@@ -1,0 +1,28 @@
+[package]
+name = "bevy_quest_hello"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# Android loads the shared library.
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[[bin]]
+# Desktop entry point (macOS/Linux/Windows)
+name = "bevy_quest_hello"
+path = "src/main.rs"
+
+
+[dependencies]
+bevy = { version = "0.17.3", default-features = false, features = [
+    "android-native-activity",
+    "android_shared_stdcxx",
+    "bevy_winit", "bevy_pbr", "bevy_render",
+    "bevy_asset", "bevy_gltf", "bevy_audio",
+    "bevy_gizmos", "bevy_text", "bevy_ui"
+] }
+
+# Dependencias para realidad virtual
+bevy_mod_xr = "0.4.0"
+bevy_mod_openxr = "0.4.0"
