@@ -1,0 +1,35 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.pablo.bevyquesthello"
+    android:installLocation="auto">
+
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true"/>
+
+    <application
+        android:label="Bevy Quest Hello"
+        android:allowBackup="false">
+
+        <!-- Use the standard NativeActivity from the OS -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode">
+
+            <meta-data android:name="com.oculus.vr.focus.aware" android:value="true"/>
+
+            <!-- The name of our Rust library -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="bevy_quest_hello" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
+
+        </activity>
+
+    </application>
+</manifest>
