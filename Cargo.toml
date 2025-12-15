@@ -11,7 +11,7 @@ crate-type = ["staticlib", "cdylib", "lib"]
 [[bin]]
 # Desktop entry point (macOS/Linux/Windows)
 name = "bevy_quest_hello"
-path = "src/main.rs"
+path = "src/lib.rs"
 
 
 [dependencies]
@@ -27,3 +27,4 @@ bevy = { version = "0.17.3", default-features = false, features = [
 bevy_mod_openxr = "0.4"
 bevy_mod_xr = "0.4"
 bevy_xr_utils = "0.4"
+log = "0.4.29"

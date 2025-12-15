@@ -1,55 +1,82 @@
+use bevy::camera::ClearColorConfig;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
-use bevy_mod_openxr::{add_xr_plugins, openxr_session_running, helper_traits::ToQuat, resources::OxrViews};
-use bevy_mod_xr::session::XrTrackingRoot;
+use bevy::render::view::{Hdr, Msaa, NoIndirectDrawing};
+
+use bevy_mod_openxr::{add_xr_plugins, openxr_session_running, resources::OxrViews};
+use bevy_mod_xr::camera::{XrCamera, XrViewInit};
+use bevy_mod_xr::session::XrSessionCreated;
+
 use bevy_xr_utils::actions::{
     ActionType, ActiveSet, XRUtilsAction, XRUtilsActionSet, XRUtilsActionState,
     XRUtilsActionSystems, XRUtilsActionsPlugin, XRUtilsBinding,
 };
 
+use log::info;
+
 #[derive(Component)]
 struct LocomotionAction;
 
-/// Configura la aplicación con plugins XR y el plugin de acciones.
-pub fn run() {
-    App::new()
+#[bevy_main]
+fn main() {
+    let mut app = App::new()
+        .insert_resource(ClearColor(Color::BLACK))
         .add_plugins(add_xr_plugins(DefaultPlugins))
-        .add_plugins(bevy_mod_xr::hand_debug_gizmos::HandGizmosPlugin)
-        .add_plugins(XRUtilsActionsPlugin) // plugin de acciones
         .add_systems(Startup, setup_scene)
-        .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
+        .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
+        .add_plugins(XRUtilsActionsPlugin)
+        .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents), )
         .add_systems(Update, handle_locomotion.run_if(openxr_session_running))
+        .add_systems(Update, log_stereo_state.run_if(openxr_session_running))
         .run();
 }
 
-#[bevy_main]
-fn main() {
-    run();
-}
-
-/// Crea el suelo y la luz.
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let cube_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 0.7, 1.0),
+        unlit: true,
+        ..default()
+    });
+
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(10.0, 0.1, 10.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.2, 0.5, 0.3))),
-        Transform::from_xyz(0.0, -0.05, 0.0),
+        Mesh3d(meshes.add(Cuboid::new(0.4, 0.4, 0.4))),
+        MeshMaterial3d(cube_mat),
+        Transform::from_xyz(0.0, 1.2, -2.0),
     ));
+
+    let origin_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.2, 0.2),
+        unlit: true,
+        ..default()
+    });
+
     commands.spawn((
-        PointLight {
-            intensity: 2000.0,
-            range: 50.0,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 8.0, 4.0),
+        Mesh3d(meshes.add(Cuboid::new(0.06, 0.06, 0.06))),
+        MeshMaterial3d(origin_mat),
+        Transform::from_xyz(0.0, 1.6, 0.0),
     ));
 }
 
-/// Crea el conjunto y la acción de locomoción, y los bindings para los mandos Quest.
+fn tune_xr_cameras(mut commands: Commands, mut cams: Query<(Entity, &mut Camera, &XrCamera)>) {
+    for (e, mut cam, xr_cam) in &mut cams {
+        cam.is_active = true;
+
+        cam.clear_color = ClearColorConfig::Custom(Color::BLACK);
+        commands.entity(e).remove::<Hdr>();
+        commands.entity(e).insert(Tonemapping::None);
+        commands.entity(e).insert(Msaa::Off);
+        // Critical change: opt out of indirect drawing on BOTH XR cameras.
+        commands.entity(e).insert(NoIndirectDrawing);
+
+        info!("tuned xr cam eye={} entity={:?}", xr_cam.0, e);
+    }
+}
+
 fn create_action_entities(mut commands: Commands) {
-    // Conjunto de acciones
     let set = commands
         .spawn((
             XRUtilsActionSet {
@@ -61,7 +88,6 @@ fn create_action_entities(mut commands: Commands) {
         ))
         .id();
 
-    // Acción vectorial para el movimiento
     let action = commands
         .spawn((
             XRUtilsAction {
@@ -73,13 +99,13 @@ fn create_action_entities(mut commands: Commands) {
         ))
         .id();
 
-    // Bindings para el thumbstick del mando derecho e izquierdo de Oculus/Meta [oai_citation:0‡raw.githubusercontent.com](https://raw.githubusercontent.com/awtterpip/bevy_oxr/main/crates/bevy_xr_utils/examples/actions.rs#:~:text=%2F%2Fcreate%20a%20binding%20let%20binding_index,into%28%29%2C).
     let binding_left = commands
         .spawn(XRUtilsBinding {
             profile: "/interaction_profiles/oculus/touch_controller".into(),
             binding: "/user/hand/left/input/thumbstick".into(),
         })
         .id();
+
     let binding_right = commands
         .spawn(XRUtilsBinding {
             profile: "/interaction_profiles/oculus/touch_controller".into(),
@@ -87,39 +113,86 @@ fn create_action_entities(mut commands: Commands) {
         })
         .id();
 
-    // Asociar bindings a la acción y la acción al set.
     commands.entity(action).add_child(binding_left);
     commands.entity(action).add_child(binding_right);
     commands.entity(set).add_child(action);
 }
 
-/// Lee el valor de la acción de locomoción y mueve el XrTrackingRoot.
 fn handle_locomotion(
     action_query: Query<&XRUtilsActionState, With<LocomotionAction>>,
-    mut oxr_root: Query<&mut Transform, With<XrTrackingRoot>>,
+    mut xr_root: Query<&mut Transform, With<bevy_mod_xr::session::XrTrackingRoot>>,
     time: Res<Time>,
-    mut views: ResMut<OxrViews>,
+    views: Res<OxrViews>,
 ) {
-    for state in action_query.iter() {
-        if let XRUtilsActionState::Vector(vector_state) = state {
-            // El vector de entrada es [x, y] en la estructura current_state
-            let input_vector = Vec3::new(
-                vector_state.current_state[0],
-                0.0,
-                -vector_state.current_state[1],
-            );
-            // Velocidad de movimiento
-            let speed = 3.0;
+    let Ok(mut root) = xr_root.single_mut() else {
+        return;
+    };
 
-            if let Ok(mut root_pos) = oxr_root.single_mut() {
-                // Usamos la orientación del visor para mover en la dirección correcta
-                if let Some(view) = views.first() {
-                    let reference_quat =
-                        root_pos.rotation * view.pose.orientation.to_quat();
-                    let locomotion = reference_quat.mul_vec3(input_vector);
-                    root_pos.translation += locomotion * speed * time.delta_secs();
-                }
-            }
-        }
+    for state in &action_query {
+        let XRUtilsActionState::Vector(vector_state) = state else {
+            continue;
+        };
+
+        let input = Vec3::new(
+            vector_state.current_state[0],
+            0.0,
+            -vector_state.current_state[1],
+        );
+        let speed = 2.0;
+
+        let yaw = views
+            .first()
+            .map(|v| {
+                let q = v.pose.orientation;
+                let q = Quat::from_xyzw(q.x, q.y, q.z, q.w);
+                let (y, _, _) = q.to_euler(EulerRot::YXZ);
+                Quat::from_rotation_y(y)
+            })
+            .unwrap_or(Quat::IDENTITY);
+
+        root.translation += yaw.mul_vec3(input) * speed * time.delta_secs();
+    }
+}
+
+fn log_stereo_state(
+    time: Res<Time>,
+    views: Res<OxrViews>,
+    cams: Query<(&XrCamera, &Camera, Option<&GlobalTransform>)>,
+    mut acc: Local<f32>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 1.0 {
+        return;
+    }
+    *acc = 0.0;
+
+    if views.len() >= 2 {
+        let l = &views[0];
+        let r = &views[1];
+        info!(
+            "views: L=({:.4},{:.4},{:.4}) R=({:.4},{:.4},{:.4})",
+            l.pose.position.x,
+            l.pose.position.y,
+            l.pose.position.z,
+            r.pose.position.x,
+            r.pose.position.y,
+            r.pose.position.z
+        );
+    } else {
+        info!("views: len={} (expected 2)", views.len());
+    }
+
+    for (xr_cam, cam, gtr) in &cams {
+        let vp = cam
+            .viewport
+            .as_ref()
+            .map(|v| (v.physical_position, v.physical_size));
+
+        let pos = gtr.map(|g| g.translation()).unwrap_or(Vec3::NAN);
+
+        info!(
+            "cam: eye={} active={} viewport={:?} clear={:?} pos=({:.3},{:.3},{:.3})",
+            xr_cam.0, cam.is_active, vp, cam.clear_color, pos.x, pos.y, pos.z
+        );
     }
 }

@@ -963,6 +963,7 @@ dependencies = [
  "bevy_mod_openxr",
  "bevy_mod_xr",
  "bevy_xr_utils",
+ "log",
 ]
 
 [[package]]
