@@ -23,6 +23,7 @@ bevy = { version = "0.17.3", default-features = false, features = [
     "bevy_gizmos", "bevy_text", "bevy_ui"
 ] }
 
-# Dependencias para realidad virtual
-bevy_mod_xr = "0.4.0"
-bevy_mod_openxr = "0.4.0"
+# VR support
+bevy_mod_openxr = "0.4"
+bevy_mod_xr = "0.4"
+bevy_xr_utils = "0.4"

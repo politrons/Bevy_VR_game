@@ -962,6 +962,7 @@ dependencies = [
  "bevy",
  "bevy_mod_openxr",
  "bevy_mod_xr",
+ "bevy_xr_utils",
 ]
 
 [[package]]
@@ -1324,6 +1325,26 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "winit",
+]
+
+[[package]]
+name = "bevy_xr_utils"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f82cd353262258aae6048ccad3544b8a978a301d9eb954d66efef6dccc91dfa9"
+dependencies = [
+ "bevy_app",
+ "bevy_color",
+ "bevy_derive",
+ "bevy_ecs",
+ "bevy_gizmos",
+ "bevy_log",
+ "bevy_math",
+ "bevy_mod_openxr",
+ "bevy_mod_xr",
+ "bevy_transform",
+ "openxr",
+ "openxr_mndx_xdev_space",
 ]
 
 [[package]]
@@ -3102,6 +3123,15 @@ dependencies = [
  "cmake",
  "libc",
  "mint",
+]
+
+[[package]]
+name = "openxr_mndx_xdev_space"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc03c3948dceb287224eaa9079a5d4f690e91b43a2385da6c686edf0f850408a"
+dependencies = [
+ "openxr",
 ]
 
 [[package]]
