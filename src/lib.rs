@@ -2,16 +2,13 @@ use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::view::{Hdr, Msaa, NoIndirectDrawing};
-
 use bevy_mod_openxr::{add_xr_plugins, openxr_session_running, resources::OxrViews};
 use bevy_mod_xr::camera::{XrCamera, XrViewInit};
 use bevy_mod_xr::session::XrSessionCreated;
-
 use bevy_xr_utils::actions::{
     ActionType, ActiveSet, XRUtilsAction, XRUtilsActionSet, XRUtilsActionState,
     XRUtilsActionSystems, XRUtilsActionsPlugin, XRUtilsBinding,
 };
-
 use log::info;
 
 #[derive(Component)]
@@ -19,15 +16,17 @@ struct LocomotionAction;
 
 #[bevy_main]
 fn main() {
+    // Use a light-blue clear colour for the background (sky).
+    // The values are in sRGB space and simulate a clear sky.
     let mut app = App::new()
-        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(ClearColor(Color::srgb(0.53, 0.81, 0.92)))
         .add_plugins(add_xr_plugins(DefaultPlugins))
         .add_systems(Startup, setup_scene)
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
         .add_plugins(XRUtilsActionsPlugin)
-        .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents), )
+        .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
         .add_systems(Update, handle_locomotion.run_if(openxr_session_running))
-        .add_systems(Update, log_stereo_state.run_if(openxr_session_running))
+        // .add_systems(Update, log_stereo_state.run_if(openxr_session_running))
         .run();
 }
 
@@ -36,12 +35,12 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // The cubes you had previously can stay for orientation.
     let cube_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.2, 0.7, 1.0),
         unlit: true,
         ..default()
     });
-
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.4, 0.4, 0.4))),
         MeshMaterial3d(cube_mat),
@@ -53,25 +52,36 @@ fn setup_scene(
         unlit: true,
         ..default()
     });
-
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.06, 0.06, 0.06))),
         MeshMaterial3d(origin_mat),
         Transform::from_xyz(0.0, 1.6, 0.0),
+    ));
+
+    // Add a long, dark‑grey road for the player to walk on.
+    // The material is unlit so its colour stays consistent under lighting.
+    let road_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.2, 0.2, 0.2),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(20.0, 0.1, 100.0))), // width 10m, depth 50m
+        MeshMaterial3d(road_mat),
+        Transform::from_xyz(0.0, -0.05, 0.0),
     ));
 }
 
 fn tune_xr_cameras(mut commands: Commands, mut cams: Query<(Entity, &mut Camera, &XrCamera)>) {
     for (e, mut cam, xr_cam) in &mut cams {
         cam.is_active = true;
-
-        cam.clear_color = ClearColorConfig::Custom(Color::BLACK);
+        // Use the same sky-blue colour for each camera’s clear colour.
+        cam.clear_color = ClearColorConfig::Custom(Color::srgb(0.53, 0.81, 0.92));
         commands.entity(e).remove::<Hdr>();
         commands.entity(e).insert(Tonemapping::None);
         commands.entity(e).insert(Msaa::Off);
-        // Critical change: opt out of indirect drawing on BOTH XR cameras.
+        // Opt out of indirect drawing on both XR cameras.
         commands.entity(e).insert(NoIndirectDrawing);
-
         info!("tuned xr cam eye={} entity={:?}", xr_cam.0, e);
     }
 }
