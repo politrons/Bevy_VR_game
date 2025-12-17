@@ -10,6 +10,7 @@ use bevy_xr_utils::actions::{
     XRUtilsActionSystems, XRUtilsActionsPlugin, XRUtilsBinding,
 };
 use log::info;
+use bevy_mod_xr::hand_debug_gizmos::HandGizmosPlugin;
 
 #[derive(Component)]
 struct MoveAction;
@@ -250,7 +251,7 @@ fn handle_locomotion(
     // 1) Turn (right stick X) around your current head position to avoid weird orbiting.
     let turn_x = apply_deadzone(turn_xy[0], settings.stick_deadzone);
     if turn_x.abs() > 0.0 {
-        let delta_yaw = turn_x * settings.turn_speed_rad_s * dt;
+        let delta_yaw = -turn_x * settings.turn_speed_rad_s * dt;
 
         let old_rot = root.rotation;
         let delta_rot = Quat::from_rotation_y(delta_yaw);
