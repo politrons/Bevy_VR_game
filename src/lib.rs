@@ -28,7 +28,6 @@ struct LocomotionSettings {
     stick_deadzone: f32,
     jump_velocity_mps: f32,
     gravity_mps2: f32,
-    ground_y: f32,
 }
 
 impl Default for LocomotionSettings {
@@ -40,8 +39,6 @@ impl Default for LocomotionSettings {
             stick_deadzone: 0.15,
             jump_velocity_mps: 3.5,
             gravity_mps2: -9.81,
-            // Your road top surface is at y = 0.0 (road is centered at -0.05 with height 0.1).
-            ground_y: 0.0,
         }
     }
 }
@@ -49,6 +46,32 @@ impl Default for LocomotionSettings {
 #[derive(Resource, Debug, Default)]
 struct PlayerKinematics {
     vertical_velocity: f32,
+}
+
+#[derive(Resource, Debug, Clone, Copy)]
+struct FloorParams {
+    center: Vec3,
+    half_extents: Vec2, // x and z half sizes
+    top_y: f32,
+    fall_floor_y: f32,
+}
+
+impl FloorParams {
+    fn ground_y_at(&self, p: Vec3) -> f32 {
+        let dx = (p.x - self.center.x).abs();
+        let dz = (p.z - self.center.z).abs();
+        if dx <= self.half_extents.x && dz <= self.half_extents.y {
+            self.top_y
+        } else {
+            self.fall_floor_y
+        }
+    }
+
+    fn is_on_floor(&self, pos: Vec3) -> bool {
+        let dx = (pos.x - self.center.x).abs();
+        let dz = (pos.z - self.center.z).abs();
+        dx <= self.half_extents.x && dz <= self.half_extents.y
+    }
 }
 
 #[bevy_main]
@@ -81,7 +104,7 @@ fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.4, 0.4, 0.4))),
         MeshMaterial3d(cube_mat),
-        Transform::from_xyz(0.0, 1.2, -2.0),
+        Transform::from_xyz(0.0, 16.2, -2.0),
     ));
 
     let origin_mat = materials.add(StandardMaterial {
@@ -92,20 +115,74 @@ fn setup_scene(
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(0.06, 0.06, 0.06))),
         MeshMaterial3d(origin_mat),
-        Transform::from_xyz(0.0, 1.6, 0.0),
+        Transform::from_xyz(0.0, 16.6, 0.0),
     ));
 
-    // A long road.
-    let road_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 0.2, 0.2),
+    // A raised long floor with a big drop if you walk off the edges.
+    // We build it as multiple meshes so the Y faces (top/bottom) can have a different color than the X/Z sides.
+    let floor_len = 100.0;
+    let floor_with = 20.0;
+    let floor_thickness = 0.2;
+
+    // Raise the floor high so looking over the edge feels like a cliff.
+    let floor_top_y = 15.0;
+    let floor_center = Vec3::new(0.0, floor_top_y - floor_thickness * 0.5, 0.0);
+
+    let floor_top_bottom_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.25, 0.25),
         unlit: true,
         ..default()
     });
+
+    let floor_side_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.10, 0.10, 0.10),
+        unlit: true,
+        ..default()
+    });
+
+    // Top floor (gives us the top/bottom Y faces with the "floor" color).
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(20.0, 0.1, 100.0))),
-        MeshMaterial3d(road_mat),
-        Transform::from_xyz(0.0, -0.05, 0.0),
+        Mesh3d(meshes.add(Cuboid::new(floor_with, floor_thickness, floor_len))),
+        MeshMaterial3d(floor_top_bottom_mat.clone()),
+        Transform::from_translation(floor_center),
     ));
+
+    // Side walls (X faces) with a darker color to make the cliff edge readable.
+    let wall_h = floor_top_y; // extend down to y=0 (visual), but you can tweak this.
+    let wall_center_y = floor_top_y * 0.5;
+
+    // Left wall
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.3, wall_h, floor_len))),
+        MeshMaterial3d(floor_side_mat.clone()),
+        Transform::from_xyz(-floor_with * 0.5, wall_center_y, 0.0),
+    ));
+    // Right wall
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.3, wall_h, floor_len))),
+        MeshMaterial3d(floor_side_mat.clone()),
+        Transform::from_xyz(floor_with * 0.5, wall_center_y, 0.0),
+    ));
+
+    // End walls (Z faces)
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, 0.3))),
+        MeshMaterial3d(floor_side_mat.clone()),
+        Transform::from_xyz(0.0, wall_center_y, -floor_len * 0.5),
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, 0.3))),
+        MeshMaterial3d(floor_side_mat.clone()),
+        Transform::from_xyz(0.0, wall_center_y, floor_len * 0.5),
+    ));
+
+    // Dynamic ground: on-road uses the road top; off-road uses a very low floor so you "fall".
+    commands.insert_resource(FloorParams {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        half_extents: Vec2::new(floor_with * 0.5, floor_len * 0.5),
+        top_y: floor_top_y,
+        fall_floor_y: -200.0,
+    });
 }
 
 fn tune_xr_cameras(mut commands: Commands, mut cams: Query<(Entity, &mut Camera, &XrCamera)>) {
@@ -210,6 +287,7 @@ fn handle_locomotion(
     time: Res<Time>,
     views: Res<OxrViews>,
     settings: Res<LocomotionSettings>,
+    road: Res<FloorParams>,
     mut kin: ResMut<PlayerKinematics>,
 ) {
     let Ok(mut root) = xr_root.single_mut() else {
@@ -275,8 +353,11 @@ fn handle_locomotion(
         root.translation += world_yaw.mul_vec3(move_input) * settings.move_speed_mps * dt;
     }
 
-    // 3) Jump + gravity (simple kinematics, grounded to y = ground_y).
-    let grounded = root.translation.y <= settings.ground_y + 0.001;
+    // 3) Jump + gravity (simple kinematics).
+    // You are only "grounded" if you are within the road bounds; otherwise you fall.
+    let ground_y = road.ground_y_at(root.translation);
+    let grounded = road.is_on_floor(root.translation) && root.translation.y <= ground_y + 0.001;
+
     if jump_pressed_edge && grounded {
         kin.vertical_velocity = settings.jump_velocity_mps;
     }
@@ -286,8 +367,9 @@ fn handle_locomotion(
         kin.vertical_velocity += settings.gravity_mps2 * dt;
         root.translation.y += kin.vertical_velocity * dt;
 
-        if root.translation.y <= settings.ground_y {
-            root.translation.y = settings.ground_y;
+        // Only clamp to the local ground.
+        if root.translation.y <= ground_y {
+            root.translation.y = ground_y;
             kin.vertical_velocity = 0.0;
         }
     }
@@ -326,4 +408,3 @@ fn apply_deadzone(v: f32, deadzone: f32) -> f32 {
         v
     }
 }
-
