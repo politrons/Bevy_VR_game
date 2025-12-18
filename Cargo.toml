@@ -16,12 +16,14 @@ path = "src/lib.rs"
 
 [dependencies]
 bevy = { version = "0.17.3", default-features = false, features = [
+    "png",
     "android-native-activity",
     "android_shared_stdcxx",
     "bevy_winit", "bevy_pbr", "bevy_render",
     "bevy_asset", "bevy_gltf", "bevy_audio",
     "bevy_gizmos", "bevy_text", "bevy_ui"
 ] }
+android_logger = "0.13"
 
 # VR support
 bevy_mod_openxr = "0.4"

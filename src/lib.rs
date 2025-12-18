@@ -1,3 +1,4 @@
+use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
@@ -9,8 +10,31 @@ use bevy_xr_utils::actions::{
     ActionType, ActiveSet, XRUtilsAction, XRUtilsActionSet, XRUtilsActionState,
     XRUtilsActionSystems, XRUtilsActionsPlugin, XRUtilsBinding,
 };
-use log::info;
-use bevy_mod_xr::hand_debug_gizmos::HandGizmosPlugin;
+use log::{error, info};
+
+// -------------------------
+// Logging
+// -------------------------
+
+#[cfg(target_os = "android")]
+pub fn setup_logging() {
+    // Requires `android_logger` + `log` in Cargo.toml.
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_tag("bevy")
+            .with_max_level(log::LevelFilter::Info),
+    );
+    log::info!("Logging initialized (android)");
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn setup_logging() {
+    println!("Logging initialized (non-android)");
+}
+
+// -------------------------
+// Locomotion components/resources
+// -------------------------
 
 #[derive(Component)]
 struct MoveAction;
@@ -74,28 +98,128 @@ impl FloorParams {
     }
 }
 
+#[derive(Resource, Debug, Clone, Copy)]
+struct FloorTopY(f32);
+
+#[derive(Resource, Debug, Default)]
+struct DidSnapToFloor(bool);
+
+
+// -------------------------
+// Optional texture probe (Android/Quest)
+// -------------------------
+
+// Load an asset once and log Loaded/Failed. This does NOT apply the texture to any mesh/material.
+#[derive(Debug, Clone)]
+struct ProbeItem {
+    handle: Handle<Image>,
+    path: String,
+    done: bool,
+}
+
+#[derive(Resource)]
+struct TextureProbe {
+    probes: Vec<ProbeItem>,
+    ticks: u32,
+}
+
+fn probe_texture_load_once(probe: Option<ResMut<TextureProbe>>, asset_server: Res<AssetServer>) {
+    let Some(mut probe) = probe else {
+        return;
+    };
+
+    probe.ticks = probe.ticks.saturating_add(1);
+    let ticks = probe.ticks;
+
+    // Log once early to confirm the system is actually running.
+    if ticks == 1 {
+        info!("TextureProbe tick=1 (system running)");
+    }
+
+    for p in &mut probe.probes {
+        if p.done {
+            continue;
+        }
+
+        let state = asset_server.get_load_state(p.handle.id());
+
+        match state {
+            Some(bevy::asset::LoadState::Loaded) => {
+                info!(
+                    "TextureProbe loaded ✅: assets/{} (id={:?})",
+                    p.path,
+                    p.handle.id()
+                );
+                p.done = true;
+            }
+            Some(bevy::asset::LoadState::Failed(err)) => {
+                error!(
+                    "TextureProbe failed ❌: assets/{} (id={:?}) err={:?}",
+                    p.path,
+                    p.handle.id(),
+                    err
+                );
+                p.done = true;
+            }
+            _ => {
+                // Log every ~120 frames so we can see if it's stuck.
+                if ticks % 120 == 0 {
+                    info!(
+                        "TextureProbe state: {:?} assets/{} (id={:?}) ticks={}",
+                        state,
+                        p.path,
+                        p.handle.id(),
+                        ticks
+                    );
+                }
+            }
+        }
+    }
+}
+
+
+// -------------------------
+// App entry
+// -------------------------
+
 #[bevy_main]
 fn main() {
-    let mut app = App::new()
-        // Sky-blue background.
+    setup_logging();
+
+    App::new()
         .insert_resource(ClearColor(Color::srgb(0.53, 0.81, 0.92)))
         .insert_resource(LocomotionSettings::default())
         .insert_resource(PlayerKinematics::default())
-        .add_plugins(add_xr_plugins(DefaultPlugins))
+        .add_plugins(add_xr_plugins(
+            DefaultPlugins.set(AssetPlugin {
+                // Android / Quest tip: avoid `.meta` lookups that can fail depending on packaging.
+                // If you rely on processed assets + meta, switch this back to `Always`.
+                meta_check: AssetMetaCheck::Never,
+                ..default()
+            }),
+        ))
+        .add_plugins(XRUtilsActionsPlugin)
         .add_systems(Startup, setup_scene)
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
-        .add_plugins(XRUtilsActionsPlugin)
         .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
+        .add_systems(Update, probe_texture_load_once)
+        .add_systems(Update, snap_player_to_floor_once.run_if(openxr_session_running))
         .add_systems(Update, handle_locomotion.run_if(openxr_session_running))
         .run();
 }
+
+// -------------------------
+// Scene
+// -------------------------
 
 fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
 ) {
-    // A couple of reference cubes.
+    // Reference cubes
     let cube_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.2, 0.7, 1.0),
         unlit: true,
@@ -118,85 +242,160 @@ fn setup_scene(
         Transform::from_xyz(0.0, 16.6, 0.0),
     ));
 
-    // A raised long floor with a big drop if you walk off the edges.
-    // We build it as multiple meshes so the Y faces (top/bottom) can have a different color than the X/Z sides.
-    let floor_len = 100.0;
-    let floor_with = 20.0;
-    let floor_thickness = 0.2;
+    // Road/floor parameters
+    let floor_len = 100.0_f32;
+    let floor_with = 20.0_f32;
+    let floor_thickness = 0.2_f32;
 
-    // Raise the floor high so looking over the edge feels like a cliff.
-    let floor_top_y = 15.0;
-    let floor_center = Vec3::new(0.0, floor_top_y - floor_thickness * 0.5, 0.0);
+    let floor_top_y = 15.0_f32;
+    let floor_center_y = floor_top_y - floor_thickness * 0.5;
 
-    let floor_top_bottom_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.25, 0.25, 0.25),
-        unlit: true,
-        ..default()
-    });
-
+    // Dark sides to read the cliff edge
     let floor_side_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.10, 0.10, 0.10),
         unlit: true,
         ..default()
     });
 
-    // Top floor (gives us the top/bottom Y faces with the "floor" color).
+    // Plain untextured floor (single slab)
+    let floor_top_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.25, 0.25),
+        unlit: true,
+        ..default()
+    });
+
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(floor_with, floor_thickness, floor_len))),
-        MeshMaterial3d(floor_top_bottom_mat.clone()),
-        Transform::from_translation(floor_center),
+        MeshMaterial3d(floor_top_mat),
+        Transform::from_xyz(0.0, floor_center_y, 0.0),
     ));
 
-    // Side walls (X faces) with a darker color to make the cliff edge readable.
-    let wall_h = floor_top_y; // extend down to y=0 (visual), but you can tweak this.
-    let wall_center_y = floor_top_y * 0.5;
+    // Side walls
+    let wall_thickness = 0.3;
+    let wall_eps = 0.01;
 
-    // Left wall
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.3, wall_h, floor_len))),
-        MeshMaterial3d(floor_side_mat.clone()),
-        Transform::from_xyz(-floor_with * 0.5, wall_center_y, 0.0),
-    ));
-    // Right wall
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.3, wall_h, floor_len))),
-        MeshMaterial3d(floor_side_mat.clone()),
-        Transform::from_xyz(floor_with * 0.5, wall_center_y, 0.0),
-    ));
+    let wall_h = (floor_top_y - floor_thickness).max(0.0);
+    let wall_center_y = wall_h * 0.5;
 
-    // End walls (Z faces)
+    let wall_x = floor_with * 0.5 + wall_thickness * 0.5 + wall_eps;
+    let wall_z = floor_len * 0.5 + wall_thickness * 0.5 + wall_eps;
+
+    // Left/right walls
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, 0.3))),
+        Mesh3d(meshes.add(Cuboid::new(wall_thickness, wall_h, floor_len))),
         MeshMaterial3d(floor_side_mat.clone()),
-        Transform::from_xyz(0.0, wall_center_y, -floor_len * 0.5),
+        Transform::from_xyz(-wall_x, wall_center_y, 0.0),
     ));
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, 0.3))),
+        Mesh3d(meshes.add(Cuboid::new(wall_thickness, wall_h, floor_len))),
         MeshMaterial3d(floor_side_mat.clone()),
-        Transform::from_xyz(0.0, wall_center_y, floor_len * 0.5),
+        Transform::from_xyz(wall_x, wall_center_y, 0.0),
     ));
 
-    // Dynamic ground: on-road uses the road top; off-road uses a very low floor so you "fall".
+    // End walls
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, wall_thickness))),
+        MeshMaterial3d(floor_side_mat.clone()),
+        Transform::from_xyz(0.0, wall_center_y, -wall_z),
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, wall_thickness))),
+        MeshMaterial3d(floor_side_mat.clone()),
+        Transform::from_xyz(0.0, wall_center_y, wall_z),
+    ));
+
+    // Ground logic: on-road clamps to top, off-road falls down
     commands.insert_resource(FloorParams {
         center: Vec3::new(0.0, 0.0, 0.0),
         half_extents: Vec2::new(floor_with * 0.5, floor_len * 0.5),
         top_y: floor_top_y,
         fall_floor_y: -200.0,
     });
+    commands.insert_resource(FloorTopY(floor_top_y));
+    commands.insert_resource(DidSnapToFloor(false));
+    // Try loading textures (not used on any mesh) to validate Android asset loading.
+    // We probe both common APK layouts:
+    // - assets/textures/...  (expected)
+    // - assets/assets/textures/... (common accidental double-nesting)
+    let p1 = "textures/grass.png".to_string();
+    let h1: Handle<Image> = asset_server.load(p1.clone());
+    info!("TextureProbe requested: assets/{}", p1);
+
+    let p2 = "assets/textures/grass.png".to_string();
+    let h2: Handle<Image> = asset_server.load(p2.clone());
+    info!("TextureProbe requested: assets/{}", p2);
+
+    // Now that PNG support is enabled, actually use the texture on a visible mesh.
+    // If this appears, AssetServer loading + material texturing are working end-to-end.
+    let grass_mat = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        base_color_texture: Some(h1.clone()),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(0.8, 0.8, 0.8))),
+        MeshMaterial3d(grass_mat),
+        Transform::from_xyz(2.4, 16.2, -2.0),
+    ));
+
+    commands.insert_resource(TextureProbe {
+        probes: vec![
+            ProbeItem {
+                handle: h1,
+                path: p1,
+                done: false,
+            },
+            ProbeItem {
+                handle: h2,
+                path: p2,
+                done: false,
+            },
+        ],
+        ticks: 0,
+    });
 }
 
+fn snap_player_to_floor_once(
+    mut xr_root: Query<&mut Transform, With<XrTrackingRoot>>,
+    floor: Res<FloorTopY>,
+    mut did: ResMut<DidSnapToFloor>,
+) {
+    if did.0 {
+        return;
+    }
+
+    let Ok(mut root) = xr_root.single_mut() else {
+        return;
+    };
+
+    root.translation.y = floor.0;
+    did.0 = true;
+
+    info!("Snapped XrTrackingRoot to floor y={}", floor.0);
+}
+
+// (see above for correct version)
+
+// -------------------------
+// XR camera tuning (right-eye flicker fix)
+// -------------------------
+
 fn tune_xr_cameras(mut commands: Commands, mut cams: Query<(Entity, &mut Camera, &XrCamera)>) {
-    for (e, mut cam, xr_cam) in &mut cams {
+    for (e, mut cam, _xr_cam) in &mut cams {
         cam.is_active = true;
         cam.clear_color = ClearColorConfig::Custom(Color::srgb(0.53, 0.81, 0.92));
         commands.entity(e).remove::<Hdr>();
         commands.entity(e).insert(Tonemapping::None);
         commands.entity(e).insert(Msaa::Off);
-        // Fix for the right-eye flicker: disable indirect drawing per camera.
+        // Fix for right-eye flicker: disable indirect drawing per camera.
         commands.entity(e).insert(NoIndirectDrawing);
-        info!("tuned xr cam eye={} entity={:?}", xr_cam.0, e);
     }
 }
+
+// -------------------------
+// Actions
+// -------------------------
 
 fn create_action_entities(mut commands: Commands) {
     let set = commands
@@ -231,7 +430,7 @@ fn create_action_entities(mut commands: Commands) {
 
     commands.entity(move_action).add_child(move_binding_left);
 
-    // RIGHT stick: rotate (smooth turn) around your head position.
+    // RIGHT stick: rotate.
     let turn_action = commands
         .spawn((
             XRUtilsAction {
@@ -279,6 +478,10 @@ fn create_action_entities(mut commands: Commands) {
     commands.entity(set).add_child(jump_action);
 }
 
+// -------------------------
+// Locomotion
+// -------------------------
+
 fn handle_locomotion(
     move_query: Query<&XRUtilsActionState, With<MoveAction>>,
     turn_query: Query<&XRUtilsActionState, With<TurnAction>>,
@@ -321,12 +524,12 @@ fn handle_locomotion(
         })
         .unwrap_or(false);
 
-    // Head yaw + a pivot point (avg eye position) in *tracking-space*.
+    // Head yaw + a pivot point (avg eye position) in tracking-space.
     let Some((head_yaw, pivot_local)) = head_yaw_and_pivot(&views) else {
         return;
     };
 
-    // 1) Turn (right stick X) around your current head position to avoid weird orbiting.
+    // 1) Turn (right stick X) around your current head position.
     let turn_x = apply_deadzone(turn_xy[0], settings.stick_deadzone);
     if turn_x.abs() > 0.0 {
         let delta_yaw = -turn_x * settings.turn_speed_rad_s * dt;
@@ -343,7 +546,7 @@ fn handle_locomotion(
         root.rotation = new_rot;
     }
 
-    // 2) Move (left stick) in the direction you are looking (root rotation + head yaw).
+    // 2) Move (left stick) in the direction you are looking.
     let move_x = apply_deadzone(move_xy[0], settings.stick_deadzone);
     let move_y = apply_deadzone(move_xy[1], settings.stick_deadzone);
     let move_input = Vec3::new(move_x, 0.0, -move_y);
@@ -353,21 +556,18 @@ fn handle_locomotion(
         root.translation += world_yaw.mul_vec3(move_input) * settings.move_speed_mps * dt;
     }
 
-    // 3) Jump + gravity (simple kinematics).
-    // You are only "grounded" if you are within the road bounds; otherwise you fall.
+    // 3) Jump + gravity.
     let ground_y = road.ground_y_at(root.translation);
-    let grounded = road.is_on_floor(root.translation) && root.translation.y <= ground_y + 0.001;
+    let grounded = road.is_on_floor(root.translation) && (root.translation.y - ground_y).abs() <= 0.05;
 
     if jump_pressed_edge && grounded {
         kin.vertical_velocity = settings.jump_velocity_mps;
     }
 
-    // Integrate vertical motion.
     if !grounded || kin.vertical_velocity > 0.0 {
         kin.vertical_velocity += settings.gravity_mps2 * dt;
         root.translation.y += kin.vertical_velocity * dt;
 
-        // Only clamp to the local ground.
         if root.translation.y <= ground_y {
             root.translation.y = ground_y;
             kin.vertical_velocity = 0.0;
@@ -386,16 +586,17 @@ fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
     let (y, _, _) = q.to_euler(EulerRot::YXZ);
     let yaw = Quat::from_rotation_y(y);
 
-    // Position: average up to first two views (left/right eye) for an approximate head center.
+    // Position: average up to first two views (left/right eye).
     let mut sum = Vec3::ZERO;
     let mut n = 0.0;
     for v in views.iter().take(2) {
         sum += Vec3::new(v.pose.position.x, v.pose.position.y, v.pose.position.z);
         n += 1.0;
     }
+
     let avg = if n > 0.0 { sum / n } else { Vec3::ZERO };
 
-    // Pivot only in XZ (we rotate around the vertical axis).
+    // Pivot only in XZ.
     let pivot = Vec3::new(avg.x, 0.0, avg.z);
 
     Some((yaw, pivot))
