@@ -42,8 +42,19 @@ struct MoveAction;
 #[derive(Component)]
 struct TurnAction;
 
+
 #[derive(Component)]
 struct JumpAction;
+
+#[derive(Component, Debug, Clone, Copy)]
+struct MovingPlatform {
+    half_extents: Vec2, // x and z half sizes
+    thickness: f32,
+    z_min: f32,
+    z_max: f32,
+    speed_mps: f32,
+    dir: f32, // +1 or -1 along Z
+}
 
 #[derive(Resource, Debug, Clone, Copy)]
 struct LocomotionSettings {
@@ -203,6 +214,7 @@ fn main() {
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
         .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
         .add_systems(Update, probe_texture_load_once)
+        .add_systems(Update, move_platforms.run_if(openxr_session_running))
         .add_systems(Update, snap_player_to_floor_once.run_if(openxr_session_running))
         .add_systems(Update, handle_locomotion.run_if(openxr_session_running))
         .run();
@@ -216,7 +228,7 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    _images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
 ) {
     // Reference cubes
@@ -316,14 +328,9 @@ fn setup_scene(
     // Try loading textures (not used on any mesh) to validate Android asset loading.
     // We probe both common APK layouts:
     // - assets/textures/...  (expected)
-    // - assets/assets/textures/... (common accidental double-nesting)
     let p1 = "textures/grass.png".to_string();
     let h1: Handle<Image> = asset_server.load(p1.clone());
     info!("TextureProbe requested: assets/{}", p1);
-
-    let p2 = "assets/textures/grass.png".to_string();
-    let h2: Handle<Image> = asset_server.load(p2.clone());
-    info!("TextureProbe requested: assets/{}", p2);
 
     // Now that PNG support is enabled, actually use the texture on a visible mesh.
     // If this appears, AssetServer loading + material texturing are working end-to-end.
@@ -339,16 +346,41 @@ fn setup_scene(
         Transform::from_xyz(2.4, 16.2, -2.0),
     ));
 
+    // Moving platform you can ride.
+    // It travels back-and-forth along Z over the road.
+    let platform_half_extents = Vec2::new(1.0, 1.0);
+    let platform_thickness = 0.25_f32;
+    let platform_top_y = floor_top_y + 0.6; // above the main floor
+
+    let platform_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.9, 0.9, 0.9),
+        unlit: true,
+        ..default()
+    });
+
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(
+            platform_half_extents.x * 2.0,
+            platform_thickness,
+            platform_half_extents.y * 2.0,
+        ))),
+        MeshMaterial3d(platform_mat),
+        Transform::from_xyz(0.0, platform_top_y - platform_thickness * 0.5, -20.0),
+        MovingPlatform {
+            half_extents: platform_half_extents,
+            thickness: platform_thickness,
+            z_min: -45.0,
+            z_max: 45.0,
+            speed_mps: 2.0,
+            dir: 1.0,
+        },
+    ));
+
     commands.insert_resource(TextureProbe {
         probes: vec![
             ProbeItem {
                 handle: h1,
                 path: p1,
-                done: false,
-            },
-            ProbeItem {
-                handle: h2,
-                path: p2,
                 done: false,
             },
         ],
@@ -486,11 +518,12 @@ fn handle_locomotion(
     move_query: Query<&XRUtilsActionState, With<MoveAction>>,
     turn_query: Query<&XRUtilsActionState, With<TurnAction>>,
     jump_query: Query<&XRUtilsActionState, With<JumpAction>>,
-    mut xr_root: Query<&mut Transform, With<XrTrackingRoot>>,
+    mut xr_root: Query<&mut Transform, (With<XrTrackingRoot>, Without<MovingPlatform>)>,
     time: Res<Time>,
     views: Res<OxrViews>,
     settings: Res<LocomotionSettings>,
     road: Res<FloorParams>,
+    platforms: Query<(&Transform, &MovingPlatform), Without<XrTrackingRoot>>,
     mut kin: ResMut<PlayerKinematics>,
 ) {
     let Ok(mut root) = xr_root.single_mut() else {
@@ -557,8 +590,12 @@ fn handle_locomotion(
     }
 
     // 3) Jump + gravity.
-    let ground_y = road.ground_y_at(root.translation);
-    let grounded = road.is_on_floor(root.translation) && (root.translation.y - ground_y).abs() <= 0.05;
+    // Ground can be either the road or a moving platform (whichever is higher under the player).
+    let (ground_y, ground_vel) = ground_y_and_velocity(root.translation, &road, &platforms);
+    let grounded = (root.translation.y - ground_y).abs() <= 0.05;
+
+    // If we're standing on something that moves (platform), carry the player with it.
+    root.translation += ground_vel * dt;
 
     if jump_pressed_edge && grounded {
         kin.vertical_velocity = settings.jump_velocity_mps;
@@ -573,6 +610,51 @@ fn handle_locomotion(
             kin.vertical_velocity = 0.0;
         }
     }
+}
+
+fn move_platforms(mut q: Query<(&mut Transform, &mut MovingPlatform)>, time: Res<Time>) {
+    let dt = time.delta_secs();
+
+    for (mut t, mut p) in &mut q {
+        t.translation.z += p.dir * p.speed_mps * dt;
+
+        if t.translation.z > p.z_max {
+            t.translation.z = p.z_max;
+            p.dir = -1.0;
+        } else if t.translation.z < p.z_min {
+            t.translation.z = p.z_min;
+            p.dir = 1.0;
+        }
+    }
+}
+
+fn ground_y_and_velocity(
+    pos: Vec3,
+    road: &FloorParams,
+    platforms: &Query<(&Transform, &MovingPlatform), Without<XrTrackingRoot>>,
+) -> (f32, Vec3) {
+    // Start with the road ground.
+    let mut best_y = road.ground_y_at(pos);
+    let mut best_vel = Vec3::ZERO;
+
+    for (t, p) in platforms.iter() {
+        // Platform center and top surface.
+        let center = t.translation;
+        let top_y = center.y + p.thickness * 0.5;
+
+        // Check if player is within the platform XZ footprint.
+        let dx = (pos.x - center.x).abs();
+        let dz = (pos.z - center.z).abs();
+        if dx <= p.half_extents.x && dz <= p.half_extents.y {
+            if top_y > best_y {
+                best_y = top_y;
+                // Platform moves along Z only.
+                best_vel = Vec3::new(0.0, 0.0, p.dir * p.speed_mps);
+            }
+        }
+    }
+
+    (best_y, best_vel)
 }
 
 fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
