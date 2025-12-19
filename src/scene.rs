@@ -1,8 +1,5 @@
 use bevy::prelude::*;
 use bevy_mod_xr::session::XrTrackingRoot;
-use log::info;
-use crate::assets::{ProbeItem, TextureProbe};
-use crate::locomotion::MovingPlatform;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct PlayerSpawn {
@@ -79,32 +76,10 @@ pub(crate) fn setup_scene(
     _images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
 ) {
-    // Reference cubes
-    let cube_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 0.7, 1.0),
-        unlit: true,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.4, 0.4, 0.4))),
-        MeshMaterial3d(cube_mat),
-        Transform::from_xyz(0.0, 16.2, -2.0),
-    ));
-
-    let origin_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.2, 0.2),
-        unlit: true,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.06, 0.06, 0.06))),
-        MeshMaterial3d(origin_mat),
-        Transform::from_xyz(0.0, 16.6, 0.0),
-    ));
-
     // Road/floor parameters
-    let floor_len = 100.0_f32;
-    let floor_with = 20.0_f32;
+    // Half the previous size (width and length)
+    let floor_len = 50.0_f32;
+    let floor_with = 10.0_f32;
     let floor_thickness = 0.2_f32;
 
     let floor_top_y = 15.0_f32;
@@ -112,7 +87,7 @@ pub(crate) fn setup_scene(
 
     // Player spawn point: on the main floor near the beginning of the run.
     commands.insert_resource(PlayerSpawn {
-        pos: Vec3::new(0.0, floor_top_y, -40.0),
+        pos: Vec3::new(0.0, floor_top_y, -20.0),
         rot: Quat::IDENTITY,
     });
 
@@ -179,61 +154,6 @@ pub(crate) fn setup_scene(
     });
     commands.insert_resource(FloorTopY(floor_top_y));
     commands.insert_resource(DidSnapToFloor(false));
-
-    // Try loading textures (and also use them on a visible mesh).
-    let p1 = "textures/grass.png".to_string();
-    let h1: Handle<Image> = asset_server.load(p1.clone());
-    info!("TextureProbe requested: assets/{}", p1);
-
-    let grass_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        base_color_texture: Some(h1.clone()),
-        unlit: true,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(0.8, 0.8, 0.8))),
-        MeshMaterial3d(grass_mat),
-        Transform::from_xyz(2.4, 16.2, -2.0),
-    ));
-
-    // Moving platform you can ride.
-    let platform_half_extents = Vec2::new(1.0, 1.0);
-    let platform_thickness = 0.25_f32;
-    let platform_top_y = floor_top_y + 0.6; // above the main floor
-
-    let platform_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.9, 0.9, 0.9),
-        unlit: true,
-        ..default()
-    });
-
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(
-            platform_half_extents.x * 2.0,
-            platform_thickness,
-            platform_half_extents.y * 2.0,
-        ))),
-        MeshMaterial3d(platform_mat),
-        Transform::from_xyz(0.0, platform_top_y - platform_thickness * 0.5, -20.0),
-        MovingPlatform {
-            half_extents: platform_half_extents,
-            thickness: platform_thickness,
-            z_min: -45.0,
-            z_max: 45.0,
-            speed_mps: 2.0,
-            dir: 1.0,
-        },
-    ));
-
-    commands.insert_resource(TextureProbe {
-        probes: vec![ProbeItem {
-            handle: h1,
-            path: p1,
-            done: false,
-        }],
-        ticks: 0,
-    });
 }
 
 /// Snaps the XR tracking root's Y translation to the floor height exactly once.
@@ -256,6 +176,4 @@ pub(crate) fn snap_player_to_floor_once(
     // Force the root to sit on the floor at startup.
     root.translation.y = floor.0;
     did.0 = true;
-
-    info!("Snapped XrTrackingRoot to floor y={}", floor.0);
 }

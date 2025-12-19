@@ -1,13 +1,12 @@
 use bevy::prelude::*;
-use bevy::ecs::schedule::common_conditions::resource_exists;
+use bevy::pbr::{ MeshMaterial3d};
 use bevy_mod_openxr::resources::OxrViews;
 use bevy_mod_xr::session::XrTrackingRoot;
 use bevy_xr_utils::actions::XRUtilsActionState;
-
 use crate::scene::{FloorParams, PlayerSpawn};
 
 // -------------------------
-// Locomotion components/resources
+// XR input marker components
 // -------------------------
 
 /// Marker component attached to the XR action entity that provides the left-stick (move) input.
@@ -28,22 +27,15 @@ pub(crate) struct TurnAction;
 #[derive(Component)]
 pub(crate) struct JumpAction;
 
-/// Back-and-forth moving platform (legacy / optional).
-#[derive(Component, Debug, Clone, Copy)]
-pub(crate) struct MovingPlatform {
-    pub(crate) half_extents: Vec2, // x and z half sizes
-    pub(crate) thickness: f32,
-    pub(crate) z_min: f32,
-    pub(crate) z_max: f32,
-    pub(crate) speed_mps: f32,
-    pub(crate) dir: f32, // +1 or -1 along Z
-}
+// -------------------------
+// Moving ramps
+// -------------------------
 
-/// A moving ramp that travels forward (Z) and also oscillates in X (left/right) and Y (up/down).
+/// A moving ramp that travels forward (Z) only.
 ///
-/// - Z movement provides the "conveyor" progression: ramps advance away from the player.
-/// - X/Y oscillation makes the path feel dynamic.
-/// - Ramps are despawned once they go past their configured end bound.
+/// - Ramps advance away from the player along +Z.
+/// - Ramps are despawned once they go past the end bound.
+/// - `current_vel` is used to carry the player when grounded on a ramp.
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct MovingRamp {
     /// Half-size footprint in X/Z used for simple standing checks.
@@ -80,21 +72,283 @@ pub(crate) struct MovingRamp {
     pub(crate) current_vel: Vec3,
 }
 
-/// Tracks whether the player has already stepped onto a ramp.
-///
-/// Once the player has been on a ramp, touching the main floor again is considered a failure
-/// and will reset the player to the start.
-#[derive(Resource, Debug, Default)]
-pub(crate) struct PlayerProgress {
-    pub(crate) has_touched_ramp: bool,
+// -------------------------
+// Ramps: spawning (multi-lane, endless-ish)
+// -------------------------
+
+/// Shared render assets used by all moving ramps.
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct RampRenderAssets {
+    pub(crate) mesh: Handle<Mesh>,
+    pub(crate) material: Handle<StandardMaterial>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GroundKind {
-    Road,
-    Platform,
-    Ramp,
+/// Configuration controlling how many ramps exist, how they are spaced, and their height limits.
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct RampSpawnConfig {
+    /// Number of parallel lanes across X.
+    pub(crate) lanes: usize,
+    /// Distance (meters) between lane centers.
+    pub(crate) lane_spacing: f32,
+
+    /// Ramp size (X width, Y thickness, Z depth).
+    pub(crate) ramp_size: Vec3,
+
+    /// Z spacing between consecutive ramps in a lane.
+    pub(crate) z_gap: f32,
+    /// How many ramps to pre-fill per lane on first run.
+    pub(crate) initial_per_lane: usize,
+
+    /// Max |delta-y| between consecutive ramps in a lane (jumpable vertical step).
+    pub(crate) max_step_y: f32,
+    /// Minimum and maximum ramp height above floor top.
+    pub(crate) y_min_above_floor: f32,
+    pub(crate) y_max_above_floor: f32,
+
+    /// Random X offset inside each lane.
+    pub(crate) lane_jitter_x: f32,
+
+    /// Move speed (m/s) along Z.
+    pub(crate) z_speed_mps: f32,
+    /// How far (in Z) ramps can travel before despawning.
+    pub(crate) travel_distance_z: f32,
+
+    /// How often to spawn new ramps per lane.
+    pub(crate) spawn_every_s: f32,
 }
+
+impl Default for RampSpawnConfig {
+    fn default() -> Self {
+        Self {
+            // Wide floor: multiple lanes so there are alternative paths.
+            lanes: 7,
+            lane_spacing: 3.0,
+            // Size tuned to feel jumpable.
+            ramp_size: Vec3::new(2.2, 0.25, 2.2),
+            // Distance between consecutive ramps per lane.
+            z_gap: 3.0,
+            // Pre-fill each lane so it looks populated from the start.
+            initial_per_lane: 10,
+            // Jump feasibility: limit vertical changes per step.
+            max_step_y: 1.2,
+            // Absolute height limits above the floor.
+            y_min_above_floor: 0.8,
+            y_max_above_floor: 6.0,
+            // Small random jitter within each lane.
+            lane_jitter_x: 0.6,
+            // Conveyor speed.
+            z_speed_mps: 2.5,
+            // Past this distance, ramps despawn.
+            travel_distance_z: 90.0,
+            // Spawn cadence.
+            spawn_every_s: 0.9,
+        }
+    }
+}
+
+/// Internal state for deterministic-ish random spawning.
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct RampSpawnState {
+    pub(crate) initialized: bool,
+    pub(crate) seed: u64,
+    pub(crate) lane_last_y: Vec<f32>,
+    pub(crate) accum_s: f32,
+}
+
+impl Default for RampSpawnState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            seed: 0xC0FFEE_u64,
+            lane_last_y: Vec::new(),
+            accum_s: 0.0,
+        }
+    }
+}
+
+fn rng_next_u32(seed: &mut u64) -> u32 {
+    // xorshift64*
+    *seed ^= *seed >> 12;
+    *seed ^= *seed << 25;
+    *seed ^= *seed >> 27;
+    ((*seed).wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u32
+}
+
+fn rng_f32_01(seed: &mut u64) -> f32 {
+    let x = rng_next_u32(seed);
+    (x & 0x00FF_FFFF) as f32 / 16_777_215.0
+}
+
+fn rng_f32_range(seed: &mut u64, min: f32, max: f32) -> f32 {
+    min + (max - min) * rng_f32_01(seed)
+}
+
+/// Creates the shared ramp mesh/material and the spawn config/state.
+///
+/// Call this once at Startup so the resources exist before spawning.
+pub(crate) fn setup_ramp_spawner(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let ramp_mesh = meshes.add(Cuboid::new(2.2, 0.25, 2.2));
+    let ramp_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.90, 0.10, 0.60),
+        perceptual_roughness: 0.9,
+        metallic: 0.0,
+        ..default()
+    });
+
+    commands.insert_resource(RampRenderAssets {
+        mesh: ramp_mesh,
+        material: ramp_material,
+    });
+    commands.insert_resource(RampSpawnConfig::default());
+    commands.insert_resource(RampSpawnState::default());
+}
+
+fn lane_x_from_index(lane: usize, lanes: usize, spacing: f32) -> f32 {
+    let center = (lanes as f32 - 1.0) * 0.5;
+    (lane as f32 - center) * spacing
+}
+
+fn choose_lane_y(seed: &mut u64, y_min: f32, y_max: f32, max_step: f32, prev_y: f32) -> f32 {
+    let dy = rng_f32_range(seed, -max_step, max_step);
+    (prev_y + dy).clamp(y_min, y_max)
+}
+
+fn spawn_one_ramp(
+    commands: &mut Commands,
+    assets: &RampRenderAssets,
+    pos: Vec3,
+    config: &RampSpawnConfig,
+    z_start: f32,
+    z_end: f32,
+) {
+    let half_extents = Vec2::new(config.ramp_size.x * 0.5, config.ramp_size.z * 0.5);
+    let thickness = config.ramp_size.y;
+
+    commands.spawn((
+        Mesh3d(assets.mesh.clone()),
+        MeshMaterial3d(assets.material.clone()),
+        Transform::from_translation(pos),
+        GlobalTransform::default(),
+        Visibility::default(),
+        InheritedVisibility::default(),
+        ViewVisibility::default(),
+        MovingRamp {
+            half_extents,
+            thickness,
+            base_center: pos,
+            x_amp: 0.0,
+            y_amp: 0.0,
+            x_freq: 0.0,
+            y_freq: 0.0,
+            phase: 0.0,
+            z_min: z_start - 5.0,
+            z_max: z_end + 2.0,
+            z_speed_mps: config.z_speed_mps,
+            z_dir: 1.0,
+            current_vel: Vec3::ZERO,
+        },
+    ));
+}
+
+/// Spawns many moving ramps across the wide floor.
+///
+/// - Creates multiple parallel lanes across X.
+/// - Each lane is a random walk in height (Y), clamped to the configured min/max.
+/// - Consecutive ramps differ by at most `max_step_y` so jumps stay possible.
+/// - Ramps are moved/despawned by [`move_ramps`].
+pub(crate) fn spawn_moving_ramps(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Res<RampRenderAssets>,
+    config: Res<RampSpawnConfig>,
+    mut state: ResMut<RampSpawnState>,
+    floor: Res<FloorParams>,
+) {
+    let floor_y = floor.top_y;
+    let y_min = floor_y + config.y_min_above_floor;
+    let y_max = floor_y + config.y_max_above_floor;
+
+    // Floor Z extents.
+    let z_start = floor.center.z - floor.half_extents.y;
+    let z_end = floor.center.z + floor.half_extents.y;
+
+    // Spawn slightly BEFORE the start edge so ramps appear at the beginning.
+    let z_spawn = z_start - config.z_gap * 0.5;
+
+    // One-time initialization + prefill across the whole floor.
+    if !state.initialized {
+        state.lane_last_y = vec![floor_y + 1.2; config.lanes];
+
+        let available = (z_end - z_start).max(0.0);
+        let max_count = ((available / config.z_gap).floor() as usize).saturating_add(1);
+        let fill_per_lane = config.initial_per_lane.min(max_count).max(1);
+
+        for lane in 0..config.lanes {
+            let lane_center_x = lane_x_from_index(lane, config.lanes, config.lane_spacing);
+
+            for i in 0..fill_per_lane {
+                let z = z_start + (i as f32) * config.z_gap;
+                if z > z_end {
+                    break;
+                }
+
+                let x = lane_center_x
+                    + rng_f32_range(&mut state.seed, -config.lane_jitter_x, config.lane_jitter_x);
+
+                let prev_y = state.lane_last_y[lane];
+                let y = choose_lane_y(&mut state.seed, y_min, y_max, config.max_step_y, prev_y);
+                state.lane_last_y[lane] = y;
+
+                spawn_one_ramp(
+                    &mut commands,
+                    &assets,
+                    Vec3::new(x, y, z),
+                    &config,
+                    z_start,
+                    z_end,
+                );
+            }
+        }
+
+        state.initialized = true;
+        state.accum_s = 0.0;
+        return;
+    }
+
+    // Spawn over time: always at the start edge.
+    state.accum_s += time.delta_secs();
+    if state.accum_s < config.spawn_every_s {
+        return;
+    }
+    state.accum_s = 0.0;
+
+    for lane in 0..config.lanes {
+        let lane_center_x = lane_x_from_index(lane, config.lanes, config.lane_spacing);
+        let x = lane_center_x
+            + rng_f32_range(&mut state.seed, -config.lane_jitter_x, config.lane_jitter_x);
+
+        let prev_y = state.lane_last_y[lane];
+        let y = choose_lane_y(&mut state.seed, y_min, y_max, config.max_step_y, prev_y);
+        state.lane_last_y[lane] = y;
+
+        spawn_one_ramp(
+            &mut commands,
+            &assets,
+            Vec3::new(x, y, z_spawn),
+            &config,
+            z_start,
+            z_end,
+        );
+    }
+}
+
+// -------------------------
+// Locomotion
+// -------------------------
 
 /// Tunable locomotion parameters (speed, turn rate, deadzone, jump impulse, gravity).
 ///
@@ -128,27 +382,41 @@ pub(crate) struct PlayerKinematics {
     pub(crate) vertical_velocity: f32,
 }
 
+/// Tracks whether the player has already stepped onto a ramp.
+///
+/// Once the player has been on a ramp, touching the main floor again is considered a failure
+/// and will reset the player to the start.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct PlayerProgress {
+    pub(crate) has_touched_ramp: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroundKind {
+    Road,
+    Ramp,
+}
+
 /// Main player locomotion system.
 ///
 /// - Reads XR input (move/turn/jump)
 /// - Applies smooth turning around the current head pivot
 /// - Moves in the direction the user is looking
 /// - Applies jump + gravity
-/// - Computes ground height from the road and from moving surfaces (platforms/ramps)
+/// - Computes ground height from the road and from moving surfaces (ramps)
 /// - Carries the player by the underlying moving surface velocity when standing on it
 /// - If the player falls off the ramps and lands back on the road, resets to the spawn point
 pub(crate) fn handle_locomotion(
     move_query: Query<&XRUtilsActionState, With<MoveAction>>,
     turn_query: Query<&XRUtilsActionState, With<TurnAction>>,
     jump_query: Query<&XRUtilsActionState, With<JumpAction>>,
-    mut xr_root: Query<&mut Transform, (With<XrTrackingRoot>, Without<MovingPlatform>)>,
+    mut xr_root: Query<&mut Transform, (With<XrTrackingRoot>, Without<MovingRamp>)>,
     time: Res<Time>,
     views: Option<Res<OxrViews>>,
     settings: Res<LocomotionSettings>,
     spawn: Option<Res<PlayerSpawn>>,
     mut progress: ResMut<PlayerProgress>,
     road: Option<Res<FloorParams>>,
-    platforms: Query<(&Transform, &MovingPlatform), Without<XrTrackingRoot>>,
     ramps: Query<(&Transform, &MovingRamp), Without<XrTrackingRoot>>,
     mut kin: ResMut<PlayerKinematics>,
 ) {
@@ -222,8 +490,7 @@ pub(crate) fn handle_locomotion(
         root.translation += world_yaw.mul_vec3(move_input) * settings.move_speed_mps * dt;
     }
 
-    let (ground_y, ground_vel, kind) =
-        ground_y_and_velocity(root.translation, &road, &platforms, &ramps);
+    let (ground_y, ground_vel, kind) = ground_y_and_velocity(root.translation, &road, &ramps);
     let grounded = (root.translation.y - ground_y).abs() <= 0.05;
 
     // Carry the player by the motion of the surface they are standing on.
@@ -258,29 +525,6 @@ pub(crate) fn handle_locomotion(
     }
 }
 
-/// Moves simple rectangular platforms along Z and despawns them when they reach the end.
-///
-/// This is useful for "conveyor" style gameplay: platforms do not bounce back, they disappear.
-pub(crate) fn move_platforms(
-    mut commands: Commands,
-    mut q: Query<(Entity, &mut Transform, &MovingPlatform)>,
-    time: Res<Time>,
-) {
-    let dt = time.delta_secs();
-
-    for (e, mut t, p) in &mut q {
-        t.translation.z += p.dir * p.speed_mps * dt;
-
-        let past_end = (p.dir >= 0.0 && t.translation.z >= p.z_max)
-            || (p.dir < 0.0 && t.translation.z <= p.z_min);
-
-        if past_end {
-            // Once a platform reaches the end of its travel, remove it from the world.
-            commands.entity(e).despawn();
-        }
-    }
-}
-
 /// Updates all [`MovingRamp`] entities by advancing them in Z and oscillating them in X/Y over time.
 ///
 /// Also computes and stores the current instantaneous velocity in the component so the
@@ -293,60 +537,30 @@ pub(crate) fn move_ramps(
     mut q: Query<(Entity, &mut Transform, &mut MovingRamp)>,
     time: Res<Time>,
 ) {
-    let t = time.elapsed_secs();
     let dt = time.delta_secs();
 
     for (e, mut tr, mut r) in &mut q {
-        // Advance in Z.
-        tr.translation.z += r.z_dir * r.z_speed_mps * dt;
+        let vz = r.z_speed_mps * r.z_dir;
+        tr.translation.z += vz * dt;
 
-        let past_end = (r.z_dir >= 0.0 && tr.translation.z >= r.z_max)
-            || (r.z_dir < 0.0 && tr.translation.z <= r.z_min);
+        // Forward-only velocity.
+        r.current_vel = Vec3::new(0.0, 0.0, vz);
 
-        if past_end {
+        // Despawn once past the end.
+        if tr.translation.z >= r.z_max {
             commands.entity(e).despawn();
-            continue;
         }
-
-        // Oscillate in X/Y around the base position.
-        let x = r.base_center.x + r.x_amp * (t * r.x_freq + r.phase).sin();
-        let y = r.base_center.y + r.y_amp * (t * r.y_freq + r.phase * 1.37).sin();
-        let z = tr.translation.z; // keep the advanced Z
-
-        // Instantaneous velocity: derivative of the sine waves + constant Z velocity.
-        let vx = r.x_amp * r.x_freq * (t * r.x_freq + r.phase).cos();
-        let vy = r.y_amp * r.y_freq * (t * r.y_freq + r.phase * 1.37).cos();
-        let vz = r.z_dir * r.z_speed_mps;
-        r.current_vel = Vec3::new(vx, vy, vz);
-
-        tr.translation = Vec3::new(x, y, z);
     }
 }
 
 fn ground_y_and_velocity(
     pos: Vec3,
     road: &FloorParams,
-    platforms: &Query<(&Transform, &MovingPlatform), Without<XrTrackingRoot>>,
     ramps: &Query<(&Transform, &MovingRamp), Without<XrTrackingRoot>>,
 ) -> (f32, Vec3, GroundKind) {
     let mut best_y = road.ground_y_at(pos);
     let mut best_vel = Vec3::ZERO;
     let mut best_kind = GroundKind::Road;
-
-    for (t, p) in platforms.iter() {
-        let center = t.translation;
-        let top_y = center.y + p.thickness * 0.5;
-
-        let dx = (pos.x - center.x).abs();
-        let dz = (pos.z - center.z).abs();
-        if dx <= p.half_extents.x && dz <= p.half_extents.y {
-            if top_y > best_y {
-                best_y = top_y;
-                best_vel = Vec3::new(0.0, 0.0, p.dir * p.speed_mps);
-                best_kind = GroundKind::Platform;
-            }
-        }
-    }
 
     for (t, r) in ramps.iter() {
         let center = t.translation;
@@ -390,5 +604,9 @@ fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
 }
 
 fn apply_deadzone(v: f32, deadzone: f32) -> f32 {
-    if v.abs() < deadzone { 0.0 } else { v }
+    if v.abs() < deadzone {
+        0.0
+    } else {
+        v
+    }
 }

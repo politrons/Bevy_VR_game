@@ -44,8 +44,9 @@ mod scene;
 // Imports used by the root module
 // -------------------------
 use crate::locomotion::{
-    handle_locomotion, move_platforms, JumpAction, LocomotionSettings, MoveAction, PlayerKinematics,
-    PlayerProgress, TurnAction,
+    handle_locomotion, move_ramps, setup_ramp_spawner, spawn_moving_ramps,
+    JumpAction, LocomotionSettings, MoveAction, PlayerKinematics, PlayerProgress, RampRenderAssets,
+    RampSpawnConfig, RampSpawnState, TurnAction,
 };
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
@@ -70,10 +71,21 @@ fn main() {
         ))
         .add_plugins(XRUtilsActionsPlugin)
         .add_systems(Startup, setup_scene)
+        .add_systems(Startup, setup_ramp_spawner.after(setup_scene))
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
         .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
         // Gameplay systems (guarded for Quest lifecycle quirks)
-        .add_systems(Update, move_platforms.run_if(openxr_session_running))
+        .add_systems(Update, move_ramps.run_if(openxr_session_running))
+        .add_systems(
+            Update,
+            spawn_moving_ramps
+                .run_if(openxr_session_running)
+                .run_if(resource_exists::<RampRenderAssets>)
+                .run_if(resource_exists::<RampSpawnConfig>)
+                .run_if(resource_exists::<RampSpawnState>)
+                .run_if(resource_exists::<FloorTopY>)
+                .run_if(resource_exists::<PlayerSpawn>),
+        )
         .add_systems(
             Update,
             snap_player_to_floor_once
