@@ -46,6 +46,9 @@ pub struct RampSpawnConfig {
     pub z_speed_mps: f32,
     pub travel_distance_z: f32,
     pub spawn_every_s: f32,
+
+    /// Max allowed vertical difference between adjacent lanes for ramps spawned at the same Z step.
+    pub max_cross_lane_step_y: f32,
 }
 
 impl Default for RampSpawnConfig {
@@ -57,8 +60,9 @@ impl Default for RampSpawnConfig {
             z_gap: 5.0,
             initial_per_lane: 6,
             max_step_y: 1.2,
-            y_min_above_floor: 0.9,
-            y_max_above_floor: 5.0,
+            max_cross_lane_step_y: 0.9,
+            y_min_above_floor: 1.0,
+            y_max_above_floor: 20.0,
             lane_jitter_x: 0.35,
             z_speed_mps: 2.5,
             travel_distance_z: 90.0,
@@ -161,19 +165,27 @@ pub(crate) fn spawn_moving_ramps(
     // One-time prefill so you see ramps immediately.
     if !state.initialized {
         state.initialized = true;
-        for lane in 0..config.lanes {
-            let lane_center_x = lane_center_x(lane, config.lanes, config.lane_spacing);
-            for i in 0..config.initial_per_lane {
-                let z = z_spawn_min + (i as f32) * config.z_gap;
-                if z > z_spawn_max {
-                    break;
-                }
+        // Prefill by Z-step first, then lanes, so we can clamp adjacent lanes at the same Z.
+        for i in 0..config.initial_per_lane {
+            let z = z_spawn_min + (i as f32) * config.z_gap;
+            if z > z_spawn_max {
+                break;
+            }
+
+            let mut prev_lane_y: Option<f32> = None;
+
+            for lane in 0..config.lanes {
+                let lane_center_x = lane_center_x(lane, config.lanes, config.lane_spacing);
 
                 let mut x = lane_center_x
                     + rng_f32_range(&mut state.seed, -config.lane_jitter_x, config.lane_jitter_x);
                 x = x.clamp(x_spawn_min, x_spawn_max);
 
-                let y_above = choose_next_lane_y(&config, &mut state, lane);
+                // Choose the next Y for this lane (random walk), then clamp to the previous lane's Y
+                // for the SAME Z-step so sideways moves remain feasible.
+                let mut y_above = choose_next_lane_y(&config, &mut state, lane);
+                y_above = clamp_to_neighbor_lane(&config, y_above, prev_lane_y);
+
                 spawn_one_ramp(
                     &mut commands,
                     &assets,
@@ -184,6 +196,8 @@ pub(crate) fn spawn_moving_ramps(
                     z_start,
                     z_end,
                 );
+
+                prev_lane_y = Some(y_above);
             }
         }
     }
@@ -195,13 +209,17 @@ pub(crate) fn spawn_moving_ramps(
     }
     state.accum_s = 0.0;
 
+    let mut prev_lane_y: Option<f32> = None;
+
     for lane in 0..config.lanes {
         let lane_center_x = lane_center_x(lane, config.lanes, config.lane_spacing);
         let mut x = lane_center_x
             + rng_f32_range(&mut state.seed, -config.lane_jitter_x, config.lane_jitter_x);
         x = x.clamp(x_spawn_min, x_spawn_max);
 
-        let y_above = choose_next_lane_y(&config, &mut state, lane);
+        let mut y_above = choose_next_lane_y(&config, &mut state, lane);
+        y_above = clamp_to_neighbor_lane(&config, y_above, prev_lane_y);
+
         spawn_one_ramp(
             &mut commands,
             &assets,
@@ -212,6 +230,8 @@ pub(crate) fn spawn_moving_ramps(
             z_start,
             z_end,
         );
+
+        prev_lane_y = Some(y_above);
     }
 }
 
@@ -259,6 +279,11 @@ fn spawn_one_ramp(
             current_vel: Vec3::new(0.0, 0.0, config.z_speed_mps),
         },
     ));
+}
+
+fn clamp_to_neighbor_lane(config: &RampSpawnConfig, y: f32, neighbor_y: Option<f32>) -> f32 {
+    let Some(ny) = neighbor_y else { return y; };
+    y.clamp(ny - config.max_cross_lane_step_y, ny + config.max_cross_lane_step_y)
 }
 
 fn lane_center_x(lane: usize, lanes: usize, lane_spacing: f32) -> f32 {
