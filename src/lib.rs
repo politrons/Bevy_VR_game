@@ -37,17 +37,18 @@ pub fn setup_logging() {
 // -------------------------
 
 mod assets;
-mod locomotion;
+mod player;
+mod ramp;
 mod scene;
 
 // -------------------------
 // Imports used by the root module
 // -------------------------
-use crate::locomotion::{
-    handle_locomotion, move_ramps, setup_ramp_spawner, spawn_moving_ramps,
-    JumpAction, LocomotionSettings, MoveAction, PlayerKinematics, PlayerProgress, RampRenderAssets,
-    RampSpawnConfig, RampSpawnState, TurnAction,
+use crate::player::{
+    handle_locomotion, JumpAction, LocomotionSettings, MoveAction, PlayerKinematics, PlayerProgress,
+    TurnAction,
 };
+use crate::ramp::{move_ramps, setup_ramp_spawner, spawn_moving_ramps, RampRenderAssets, RampSpawnConfig, RampSpawnState};
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
 };
@@ -83,7 +84,6 @@ fn main() {
                 .run_if(resource_exists::<RampRenderAssets>)
                 .run_if(resource_exists::<RampSpawnConfig>)
                 .run_if(resource_exists::<RampSpawnState>)
-                .run_if(resource_exists::<FloorTopY>)
                 .run_if(resource_exists::<PlayerSpawn>),
         )
         .add_systems(
