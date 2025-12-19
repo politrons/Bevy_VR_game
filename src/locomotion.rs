@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy::pbr::{ MeshMaterial3d};
+use bevy::pbr::MeshMaterial3d;
 use bevy_mod_openxr::resources::OxrViews;
 use bevy_mod_xr::session::XrTrackingRoot;
 use bevy_xr_utils::actions::XRUtilsActionState;
@@ -121,27 +121,27 @@ impl Default for RampSpawnConfig {
     fn default() -> Self {
         Self {
             // Wide floor: multiple lanes so there are alternative paths.
-            lanes: 7,
-            lane_spacing: 3.0,
+            lanes: 5,
+            lane_spacing: 2.2,
             // Size tuned to feel jumpable.
-            ramp_size: Vec3::new(2.2, 0.25, 2.2),
+            ramp_size: Vec3::new(2.0, 0.25, 2.0),
             // Distance between consecutive ramps per lane.
-            z_gap: 3.0,
+            z_gap: 5.0,
             // Pre-fill each lane so it looks populated from the start.
-            initial_per_lane: 10,
+            initial_per_lane: 6,
             // Jump feasibility: limit vertical changes per step.
             max_step_y: 1.2,
             // Absolute height limits above the floor.
-            y_min_above_floor: 0.8,
-            y_max_above_floor: 6.0,
+            y_min_above_floor: 0.9,
+            y_max_above_floor: 5.0,
             // Small random jitter within each lane.
-            lane_jitter_x: 0.6,
+            lane_jitter_x: 0.35,
             // Conveyor speed.
             z_speed_mps: 2.5,
             // Past this distance, ramps despawn.
             travel_distance_z: 90.0,
             // Spawn cadence.
-            spawn_every_s: 0.9,
+            spawn_every_s: 1.6,
         }
     }
 }
@@ -191,8 +191,15 @@ pub(crate) fn setup_ramp_spawner(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let ramp_mesh = meshes.add(Cuboid::new(2.2, 0.25, 2.2));
+    let config = RampSpawnConfig::default();
+
+    let ramp_mesh = meshes.add(Cuboid::new(
+        config.ramp_size.x,
+        config.ramp_size.y,
+        config.ramp_size.z,
+    ));
     let ramp_material = materials.add(StandardMaterial {
+        // Different from floor on purpose.
         base_color: Color::srgb(0.90, 0.10, 0.60),
         perceptual_roughness: 0.9,
         metallic: 0.0,
@@ -203,7 +210,7 @@ pub(crate) fn setup_ramp_spawner(
         mesh: ramp_mesh,
         material: ramp_material,
     });
-    commands.insert_resource(RampSpawnConfig::default());
+    commands.insert_resource(config);
     commands.insert_resource(RampSpawnState::default());
 }
 
@@ -245,8 +252,8 @@ fn spawn_one_ramp(
             x_freq: 0.0,
             y_freq: 0.0,
             phase: 0.0,
-            z_min: z_start - 5.0,
-            z_max: z_end + 2.0,
+            z_min: z_start,
+            z_max: z_end + (config.ramp_size.z * 0.5) + 0.5,
             z_speed_mps: config.z_speed_mps,
             z_dir: 1.0,
             current_vel: Vec3::ZERO,
@@ -272,12 +279,28 @@ pub(crate) fn spawn_moving_ramps(
     let y_min = floor_y + config.y_min_above_floor;
     let y_max = floor_y + config.y_max_above_floor;
 
-    // Floor Z extents.
+    // Floor bounds.
+    let x_min = floor.center.x - floor.half_extents.x;
+    let x_max = floor.center.x + floor.half_extents.x;
     let z_start = floor.center.z - floor.half_extents.y;
     let z_end = floor.center.z + floor.half_extents.y;
 
-    // Spawn slightly BEFORE the start edge so ramps appear at the beginning.
-    let z_spawn = z_start - config.z_gap * 0.5;
+    // Ramp footprint bounds (we only spawn if the whole ramp is above the floor).
+    let ramp_half_x = config.ramp_size.x * 0.5;
+    let ramp_half_z = config.ramp_size.z * 0.5;
+
+    let x_spawn_min = x_min + ramp_half_x;
+    let x_spawn_max = x_max - ramp_half_x;
+    let z_spawn_min = z_start + ramp_half_z;
+    let z_spawn_max = z_end - ramp_half_z;
+
+    // If the floor is too small to fit ramps, do nothing.
+    if x_spawn_min >= x_spawn_max || z_spawn_min >= z_spawn_max {
+        return;
+    }
+
+    // Spawn at the beginning (but fully on the floor).
+    let z_spawn = z_spawn_min;
 
     // One-time initialization + prefill across the whole floor.
     if !state.initialized {
@@ -291,13 +314,14 @@ pub(crate) fn spawn_moving_ramps(
             let lane_center_x = lane_x_from_index(lane, config.lanes, config.lane_spacing);
 
             for i in 0..fill_per_lane {
-                let z = z_start + (i as f32) * config.z_gap;
-                if z > z_end {
+                let z = z_spawn_min + (i as f32) * config.z_gap;
+                if z > z_spawn_max {
                     break;
                 }
 
-                let x = lane_center_x
+                let mut x = lane_center_x
                     + rng_f32_range(&mut state.seed, -config.lane_jitter_x, config.lane_jitter_x);
+                x = x.clamp(x_spawn_min, x_spawn_max);
 
                 let prev_y = state.lane_last_y[lane];
                 let y = choose_lane_y(&mut state.seed, y_min, y_max, config.max_step_y, prev_y);
@@ -328,8 +352,9 @@ pub(crate) fn spawn_moving_ramps(
 
     for lane in 0..config.lanes {
         let lane_center_x = lane_x_from_index(lane, config.lanes, config.lane_spacing);
-        let x = lane_center_x
+        let mut x = lane_center_x
             + rng_f32_range(&mut state.seed, -config.lane_jitter_x, config.lane_jitter_x);
+        x = x.clamp(x_spawn_min, x_spawn_max);
 
         let prev_y = state.lane_last_y[lane];
         let y = choose_lane_y(&mut state.seed, y_min, y_max, config.max_step_y, prev_y);
@@ -365,10 +390,10 @@ pub(crate) struct LocomotionSettings {
 impl Default for LocomotionSettings {
     fn default() -> Self {
         Self {
-            move_speed_mps: 2.0,
+            move_speed_mps: 2.8,
             turn_speed_rad_s: 120.0_f32.to_radians(),
             stick_deadzone: 0.15,
-            jump_velocity_mps: 3.5,
+            jump_velocity_mps: 4.2,
             gravity_mps2: -9.81,
         }
     }
@@ -525,7 +550,7 @@ pub(crate) fn handle_locomotion(
     }
 }
 
-/// Updates all [`MovingRamp`] entities by advancing them in Z and oscillating them in X/Y over time.
+/// Updates all [`MovingRamp`] entities by advancing them forward in Z only.
 ///
 /// Also computes and stores the current instantaneous velocity in the component so the
 /// locomotion system can carry the player when standing on a ramp.
