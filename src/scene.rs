@@ -85,9 +85,11 @@ pub(crate) fn setup_scene(
     let floor_top_y = 15.0_f32;
     let floor_center_y = floor_top_y - floor_thickness * 0.5;
 
-    // Player spawn point: on the main floor near the beginning of the run.
+    // Player spawn point: very high above the middle of the floor (free-fall start).
+    // Floor is centered at z=0, so "middle of the length" is z=0.
+    let spawn_height_above_floor = 80.0_f32;
     commands.insert_resource(PlayerSpawn {
-        pos: Vec3::new(0.0, floor_top_y, -20.0),
+        pos: Vec3::new(0.0, floor_top_y + spawn_height_above_floor, 0.0),
         rot: Quat::IDENTITY,
     });
 
@@ -156,13 +158,13 @@ pub(crate) fn setup_scene(
     commands.insert_resource(DidSnapToFloor(false));
 }
 
-/// Snaps the XR tracking root's Y translation to the floor height exactly once.
+/// Snaps the XR tracking root's transform to the configured PlayerSpawn exactly once.
 ///
-/// This is a pragmatic "spawn fix": it ensures the player starts on the floor even if the
+/// This is a pragmatic "spawn fix": it ensures the player starts at the desired spawn even if the
 /// initial tracking origin is slightly off.
 pub(crate) fn snap_player_to_floor_once(
     mut xr_root: Query<&mut Transform, With<XrTrackingRoot>>,
-    floor: Res<FloorTopY>,
+    spawn: Res<PlayerSpawn>,
     mut did: ResMut<DidSnapToFloor>,
 ) {
     if did.0 {
@@ -173,7 +175,9 @@ pub(crate) fn snap_player_to_floor_once(
         return;
     };
 
-    // Force the root to sit on the floor at startup.
-    root.translation.y = floor.0;
+    // Force the root to match our configured spawn once at startup.
+    // This enables the "start high in the sky" free-fall camera.
+    root.translation = spawn.pos;
+    root.rotation = spawn.rot;
     did.0 = true;
 }

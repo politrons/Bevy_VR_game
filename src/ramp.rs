@@ -92,6 +92,8 @@ pub struct RampSpawnState {
     pub accum_s: f32,
     pub seed: u32,
     pub lane_next_y: Vec<f32>,
+    /// Per-lane vertical direction (+1.0 = trending up, -1.0 = trending down).
+    pub lane_y_dir: Vec<f32>,
 }
 
 impl Default for RampSpawnState {
@@ -101,6 +103,7 @@ impl Default for RampSpawnState {
             accum_s: 0.0,
             seed: 0xC0FFEE_u32,
             lane_next_y: Vec::new(),
+            lane_y_dir: Vec::new(),
         }
     }
 }
@@ -174,6 +177,17 @@ pub(crate) fn spawn_moving_ramps(
     // Lazy-init per-lane state.
     if state.lane_next_y.len() != config.lanes {
         state.lane_next_y = vec![config.min_height_above_floor_m; config.lanes];
+        // Alternate initial direction per lane to create multiple "paths".
+        state.lane_y_dir = (0..config.lanes)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+    }
+
+    // Safety: ensure lane_y_dir is always the right length.
+    if state.lane_y_dir.len() != config.lanes {
+        state.lane_y_dir = (0..config.lanes)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
     }
 
     // One-time prefill so you see ramps immediately.
@@ -316,14 +330,28 @@ fn lane_center_x(lane: usize, lanes: usize, lane_spacing: f32) -> f32 {
 }
 
 fn choose_next_lane_y(config: &RampSpawnConfig, state: &mut RampSpawnState, lane: usize) -> f32 {
-    // Random walk in Y per lane, clamped.
+    // Directional random walk with "bounce" so lanes reliably go up AND down.
     let cur = state.lane_next_y[lane];
-    let step = rng_f32_range(
-        &mut state.seed,
-        -config.max_vertical_step_along_lane_m,
-        config.max_vertical_step_along_lane_m,
-    );
-    let next = (cur + step).clamp(config.min_height_above_floor_m, config.max_height_above_floor_m);
+
+    // Occasionally flip direction (adds long-term variety).
+    // ~7% chance per ramp spawn step.
+    if rng_f32_01(&mut state.seed) < 0.07 {
+        state.lane_y_dir[lane] *= -1.0;
+    }
+
+    // Step magnitude: always positive, direction decides sign.
+    let mag = rng_f32_range(&mut state.seed, 0.1, config.max_vertical_step_along_lane_m);
+    let mut next = cur + state.lane_y_dir[lane] * mag;
+
+    // Bounce at bounds (don’t "stick" at max/min).
+    if next >= config.max_height_above_floor_m {
+        next = config.max_height_above_floor_m;
+        state.lane_y_dir[lane] = -1.0;
+    } else if next <= config.min_height_above_floor_m {
+        next = config.min_height_above_floor_m;
+        state.lane_y_dir[lane] = 1.0;
+    }
+
     state.lane_next_y[lane] = next;
     next
 }
