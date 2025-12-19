@@ -12,7 +12,6 @@ use bevy_xr_utils::actions::{
     XRUtilsActionSystems,
     XRUtilsActionsPlugin,
 };
-
 // -------------------------
 // Logging
 // -------------------------

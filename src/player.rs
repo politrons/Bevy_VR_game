@@ -22,6 +22,13 @@ pub struct MoveAction;
 #[derive(Component)]
 pub struct TurnAction;
 
+/// Marker component attached to the XR action entity that provides the sprint (grip) input.
+///
+/// The system reads [`XRUtilsActionState::Bool`] from this entity and, when pressed,
+/// increases the movement speed by a fixed multiplier.
+#[derive(Component)]
+pub struct SprintAction;
+
 /// Marker component attached to the XR action entity that provides the jump button input.
 ///
 /// The system reads [`XRUtilsActionState::Bool`] and uses edge-detection to trigger a jump.
@@ -60,10 +67,13 @@ impl Default for PlayerSettings {
 
 /// Minimal player physics state kept across frames.
 ///
-/// Currently only tracks vertical velocity for jump + gravity integration.
+/// Currently tracks vertical velocity for jump + gravity integration,
+/// and the previous frame's Y position for true landing detection.
 #[derive(Resource, Debug, Default)]
 pub struct PlayerKinematics {
     pub vertical_velocity: f32,
+    /// Previous frame Y position of the tracking root. Used to detect true landings.
+    pub prev_y: f32,
 }
 
 /// Tracks whether the player has already stepped onto a ramp.
@@ -98,6 +108,7 @@ pub fn handle_player(
     move_query: Query<&XRUtilsActionState, With<MoveAction>>,
     turn_query: Query<&XRUtilsActionState, With<TurnAction>>,
     jump_query: Query<&XRUtilsActionState, With<JumpAction>>,
+    sprint_query: Query<&XRUtilsActionState, With<SprintAction>>,
     mut xr_root: Query<&mut Transform, (With<XrTrackingRoot>, Without<MovingRamp>)>,
     time: Res<Time>,
     views: Option<Res<OxrViews>>,
@@ -124,6 +135,10 @@ pub fn handle_player(
 
     let dt = time.delta_secs();
 
+    // Track previous frame Y for landing detection.
+    let prev_y = kin.prev_y;
+    kin.prev_y = root.translation.y;
+
     let move_xy = move_query
         .iter()
         .find_map(|s| match s {
@@ -148,6 +163,16 @@ pub fn handle_player(
             _ => None,
         })
         .unwrap_or(false);
+
+    let sprint_pressed = sprint_query
+        .iter()
+        .find_map(|s| match s {
+            XRUtilsActionState::Bool(b) => Some(b.current_state),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    let speed_mul = if sprint_pressed { 1.3 } else { 1.0 };
 
     let Some((head_yaw, pivot_local)) = head_yaw_and_pivot(&views) else {
         return;
@@ -176,18 +201,25 @@ pub fn handle_player(
 
     if move_input.length_squared() > 0.0 {
         let world_yaw = root.rotation * head_yaw;
-        root.translation += world_yaw.mul_vec3(move_input) * settings.move_speed_mps * dt;
+        root.translation += world_yaw.mul_vec3(move_input) * (settings.move_speed_mps * speed_mul) * dt;
     }
 
     // Grounding (road vs ramps).
     let (ground_y, ground_vel, kind) = ground_y_and_velocity(root.translation, &road, &ramps);
-    let grounded = (root.translation.y - ground_y).abs() <= 0.05;
+
+    // We only consider the player grounded when they are close to the surface *and*
+    // they are not moving upward. This avoids counting side-swipes as a "landing".
+    let snap_eps = 0.06;
+    let grounded = (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05;
+
+    // Detect a true landing: coming from above and crossing onto the surface while descending.
+    let landed_this_frame = kin.vertical_velocity <= 0.05 && prev_y > ground_y + 0.08 && root.translation.y <= ground_y + snap_eps;
 
     // Carry the player by the motion of the surface they are standing on.
     root.translation += ground_vel * dt;
 
-    // Track progress: once we step onto any ramp, landing on the road again resets the run.
-    if kind == GroundKind::Ramp {
+    // Track progress: only mark ramp progress on a real landing.
+    if kind == GroundKind::Ramp && landed_this_frame {
         progress.has_touched_ramp = true;
     }
 
@@ -196,6 +228,7 @@ pub fn handle_player(
         root.translation = spawn.pos;
         root.rotation = spawn.rot;
         kin.vertical_velocity = 0.0;
+        kin.prev_y = spawn.pos.y;
         progress.has_touched_ramp = false;
         return;
     }
@@ -211,6 +244,7 @@ pub fn handle_player(
         if root.translation.y <= ground_y {
             root.translation.y = ground_y;
             kin.vertical_velocity = 0.0;
+            kin.prev_y = ground_y;
         }
     }
 }
