@@ -7,6 +7,26 @@ use crate::ramp::MovingRamp;
 use crate::scene::{FloorParams, PlayerSpawn};
 
 // -------------------------
+// Ramp sliding tuning constants
+// -------------------------
+
+/// Extra acceleration applied from gravity when the player is standing on an inclined ramp.
+///
+/// - `1.0` means "physical" projection only.
+/// - Values > 1.0 make ramps feel more slippery (faster downhill, harder uphill).
+const RAMP_SLIDE_ACCEL_MULT: f32 = 1.30;
+
+/// If the absolute ramp slope (dy/dz) is below this threshold, we treat the ramp as flat.
+/// This prevents applying the "slippery" multiplier on nearly-flat surfaces.
+const RAMP_SLOPE_EPS: f32 = 1.0e-4;
+
+/// Per-second drag applied to ramp sliding velocity. Higher = more friction, lower = more sliding.
+const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.60;
+
+/// Small velocity threshold to snap ramp sliding velocity to zero (reduces tiny jitter).
+const RAMP_SLIDE_VEL_EPS: f32 = 0.03;
+
+// -------------------------
 // XR input marker components
 // -------------------------
 
@@ -34,6 +54,7 @@ pub struct SprintAction;
 /// The system reads [`XRUtilsActionState::Bool`] and uses edge-detection to trigger a jump.
 #[derive(Component)]
 pub struct JumpAction;
+
 
 // -------------------------
 // Locomotion resources
@@ -74,6 +95,10 @@ pub struct PlayerKinematics {
     pub vertical_velocity: f32,
     /// Previous frame Y position of the tracking root. Used to detect true landings.
     pub prev_y: f32,
+    /// Velocity along the ramp direction (world Z) used to simulate sliding on inclined ramps.
+    pub ramp_velocity_z: f32,
+    /// Last frame's jump button state. Used for robust edge-detection on all runtimes.
+    pub prev_jump_pressed: bool,
 }
 
 /// Tracks whether the player has already stepped onto a ramp.
@@ -155,14 +180,18 @@ pub fn handle_player(
         })
         .unwrap_or([0.0, 0.0]);
 
-    let jump_pressed_edge = jump_query
+    // We do our own rising-edge detection. Some runtimes can reset
+    // `changed_since_last_sync` before gameplay systems run.
+    let jump_pressed_now = jump_query
         .iter()
         .find_map(|s| match s {
-            // We treat a "changed" true as an edge-trigger (button down).
-            XRUtilsActionState::Bool(b) => Some(b.current_state && b.changed_since_last_sync),
+            XRUtilsActionState::Bool(b) => Some(b.current_state),
             _ => None,
         })
         .unwrap_or(false);
+
+    let jump_pressed_edge = jump_pressed_now && !kin.prev_jump_pressed;
+    kin.prev_jump_pressed = jump_pressed_now;
 
     let sprint_pressed = sprint_query
         .iter()
@@ -172,7 +201,11 @@ pub fn handle_player(
         })
         .unwrap_or(false);
 
-    let speed_mul = if sprint_pressed { 1.3 } else { 1.0 };
+
+    // Sprint is a sustained speed multiplier while the grip is held.
+    let sprint_mul = if sprint_pressed { 1.3 } else { 1.0 };
+
+    let speed_mul = sprint_mul;
 
     let Some((head_yaw, pivot_local)) = head_yaw_and_pivot(&views) else {
         return;
@@ -194,29 +227,121 @@ pub fn handle_player(
         root.rotation = new_rot;
     }
 
-    // Move in the direction the head is facing.
+    // Move input in the direction the head is facing.
+    // IMPORTANT: we compute the desired direction now, but we apply it later once we know
+    // whether we're on the road or on an inclined ramp.
     let move_x = apply_deadzone(move_xy[0], settings.stick_deadzone);
     let move_y = apply_deadzone(move_xy[1], settings.stick_deadzone);
     let move_input = Vec3::new(move_x, 0.0, -move_y);
 
-    if move_input.length_squared() > 0.0 {
+    let desired_world_dir = if move_input.length_squared() > 0.0 {
         let world_yaw = root.rotation * head_yaw;
-        root.translation += world_yaw.mul_vec3(move_input) * (settings.move_speed_mps * speed_mul) * dt;
-    }
+        world_yaw.mul_vec3(move_input).normalize_or_zero()
+    } else {
+        Vec3::ZERO
+    };
 
     // Grounding (road vs ramps).
-    let (ground_y, ground_vel, kind) = ground_y_and_velocity(root.translation, &road, &ramps);
+    // NOTE: We will compute ground twice:
+    // - First, to know what surface we're currently on (for ramp sliding / surface carry).
+    // - Second, after we move in X/Z, to resolve Y correctly at the *new* position.
+    //   This avoids jitter where we move along Z but still snap Y to the old surface.
+    let (_ground_y_before, ground_vel_before, kind_before, slope_dy_dz_before) =
+        ground_y_and_velocity(root.translation, &road, &ramps);
+
+    // Carry the player by the motion of the surface they are standing on.
+    root.translation += ground_vel_before * dt;
+
+    // Apply movement *after* we know the ground type.
+    // - On the road: standard planar movement.
+    // - On ramps: we simulate gravity along the ramp direction (world Z) so the player slides.
+    //             Climbing requires forward stick input; descending ramps speed you up.
+    if desired_world_dir.length_squared() > 0.0 {
+        match kind_before {
+            GroundKind::Road => {
+                root.translation += desired_world_dir * (settings.move_speed_mps * speed_mul) * dt;
+                // Leaving ramps: decay any leftover ramp velocity quickly.
+                kin.ramp_velocity_z *= 0.6;
+            }
+            GroundKind::Ramp => {
+                // Allow strafing freely in X.
+                root.translation.x += desired_world_dir.x * (settings.move_speed_mps * speed_mul) * dt;
+
+                // Player-controlled movement along Z (forward/back).
+                let input_z = desired_world_dir.z;
+                let input_z_speed = input_z * (settings.move_speed_mps * speed_mul);
+
+                let m = slope_dy_dz_before;
+                let slope_denom = 1.0 + m * m;
+
+                // Gravity component along the ramp direction projected onto world Z.
+                // Using slope dy/dz: a_z = g * (dy/dz) / (1 + (dy/dz)^2)
+                // This points downhill automatically because gravity is negative.
+                let mut a_z = if slope_denom > 1e-6 {
+                    settings.gravity_mps2 * (m / slope_denom)
+                } else {
+                    0.0
+                };
+
+                // Make *inclined* ramps feel more slippery (30% more sliding).
+                // We explicitly avoid applying it on nearly-flat ramps.
+                if m.abs() > RAMP_SLOPE_EPS {
+                    a_z *= RAMP_SLIDE_ACCEL_MULT;
+                }
+
+                // Apply drag in a frame-rate stable way.
+                kin.ramp_velocity_z = (kin.ramp_velocity_z + a_z * dt) * (-RAMP_SLIDE_DRAG_PER_SEC * dt).exp();
+                if kin.ramp_velocity_z.abs() < RAMP_SLIDE_VEL_EPS {
+                    kin.ramp_velocity_z = 0.0;
+                }
+
+                // Total Z speed = input + slide.
+                let z_total_speed = input_z_speed + kin.ramp_velocity_z;
+                root.translation.z += z_total_speed * dt;
+            }
+        }
+    } else {
+        // No input: still slide on ramps, stand still on the road.
+        if kind_before == GroundKind::Ramp {
+            let m = slope_dy_dz_before;
+            let slope_denom = 1.0 + m * m;
+
+            // Gravity-driven sliding when the player is standing on a ramp without input.
+            let mut a_z = if slope_denom > 1e-6 {
+                settings.gravity_mps2 * (m / slope_denom)
+            } else {
+                0.0
+            };
+
+            // Make inclined ramps more slippery.
+            if m.abs() > RAMP_SLOPE_EPS {
+                a_z *= RAMP_SLIDE_ACCEL_MULT;
+            }
+
+            kin.ramp_velocity_z = (kin.ramp_velocity_z + a_z * dt) * (-RAMP_SLIDE_DRAG_PER_SEC * dt).exp();
+            if kin.ramp_velocity_z.abs() < RAMP_SLIDE_VEL_EPS {
+                kin.ramp_velocity_z = 0.0;
+            }
+            root.translation.z += kin.ramp_velocity_z * dt;
+        } else {
+            // On the road, ramp velocity should die out.
+            kin.ramp_velocity_z *= 0.6;
+        }
+    }
+
+    // Recompute ground at the *new* X/Z.
+    let (ground_y, _ground_vel, kind, _slope_dy_dz) =
+        ground_y_and_velocity(root.translation, &road, &ramps);
 
     // We only consider the player grounded when they are close to the surface *and*
     // they are not moving upward. This avoids counting side-swipes as a "landing".
     let snap_eps = 0.06;
-    let grounded = (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05;
+    let mut grounded = (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05;
 
     // Detect a true landing: coming from above and crossing onto the surface while descending.
-    let landed_this_frame = kin.vertical_velocity <= 0.05 && prev_y > ground_y + 0.08 && root.translation.y <= ground_y + snap_eps;
-
-    // Carry the player by the motion of the surface they are standing on.
-    root.translation += ground_vel * dt;
+    let landed_this_frame = kin.vertical_velocity <= 0.05
+        && prev_y > ground_y + 0.08
+        && root.translation.y <= ground_y + snap_eps;
 
     // Track progress: only mark ramp progress on a real landing.
     if kind == GroundKind::Ramp && landed_this_frame {
@@ -229,15 +354,34 @@ pub fn handle_player(
         root.rotation = spawn.rot;
         kin.vertical_velocity = 0.0;
         kin.prev_y = spawn.pos.y;
+        kin.ramp_velocity_z = 0.0;
+        // Reset button-edge state so the next press is detected correctly after respawn.
+        kin.prev_jump_pressed = false;
         progress.has_touched_ramp = false;
         return;
     }
 
-    if jump_pressed_edge && grounded {
+    // IMPORTANT: if we jump this frame, we must treat the player as airborne immediately.
+    // Otherwise the "grounded" branch below would snap Y to the surface and reset
+    // `vertical_velocity` back to 0 in the same frame (making jumps appear broken).
+    let jumped_this_frame = jump_pressed_edge && grounded;
+    if jumped_this_frame {
         kin.vertical_velocity = settings.jump_velocity_mps;
+        // Jumping cancels ramp sliding so we don't carry weird lateral speed into the air.
+        kin.ramp_velocity_z = 0.0;
+        grounded = false;
     }
 
-    if !grounded || kin.vertical_velocity > 0.0 {
+    // Vertical integration + snap-to-surface.
+    // If grounded, keep Y glued to the surface.
+    // If airborne (or rising), apply gravity and clamp when we hit the surface.
+    if grounded {
+        root.translation.y = ground_y;
+        kin.vertical_velocity = 0.0;
+        kin.prev_y = ground_y;
+        // Keep button-edge state consistent while grounded.
+        // (No-op here, but explicit so future changes don't accidentally reset it.)
+    } else {
         kin.vertical_velocity += settings.gravity_mps2 * dt;
         root.translation.y += kin.vertical_velocity * dt;
 
@@ -249,33 +393,47 @@ pub fn handle_player(
     }
 }
 
+/// Returns the surface Y, surface velocity, ground kind, and slope dy/dz under the player.
 fn ground_y_and_velocity(
     pos: Vec3,
     road: &FloorParams,
     ramps: &Query<(&Transform, &MovingRamp), Without<XrTrackingRoot>>,
-) -> (f32, Vec3, GroundKind) {
+) -> (f32, Vec3, GroundKind, f32) {
     let mut best_y = road.ground_y_at(pos);
     let mut best_vel = Vec3::ZERO;
     let mut best_kind = GroundKind::Road;
+    // Slope dy/dz of the best ramp under the player. 0.0 means flat.
+    let mut best_slope_dy_dz = 0.0;
 
     for (t, r) in ramps.iter() {
         let center = t.translation;
 
-        // These fields must exist in `MovingRamp` (defined in `ramp.rs`).
-        let top_y = center.y + r.thickness * 0.5;
-
+        // Ramps are axis-aligned rectangles in X/Z, but may be inclined in Y along Z.
+        // We compute the surface height under the player by interpolating along Z.
         let dx = (pos.x - center.x).abs();
-        let dz = (pos.z - center.z).abs();
-        if dx <= r.half_extents.x && dz <= r.half_extents.y {
-            if top_y > best_y {
-                best_y = top_y;
+        let dz_local = pos.z - center.z;
+        let dz_abs = dz_local.abs();
+
+        if dx <= r.half_extents.x && dz_abs <= r.half_extents.y {
+            // Ask the ramp for the top surface height at this world Z.
+            // Returns `None` if the ramp has no valid surface at that Z (e.g., degenerate).
+            let Some(top_surface_y) = r.surface_top_y_at(pos.z) else {
+                continue;
+            };
+            // dy/dz slope of the ramp surface (positive means it rises as Z increases).
+            // Used to apply a gravity component along the ramp direction.
+            let slope_dy_dz = r.surface_slope_dy_dz();
+
+            if top_surface_y > best_y {
+                best_y = top_surface_y;
                 best_vel = r.current_vel;
                 best_kind = GroundKind::Ramp;
+                best_slope_dy_dz = slope_dy_dz;
             }
         }
     }
 
-    (best_y, best_vel, best_kind)
+    (best_y, best_vel, best_kind, best_slope_dy_dz)
 }
 
 fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
