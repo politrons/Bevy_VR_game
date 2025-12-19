@@ -45,7 +45,7 @@ mod scene;
 // Imports used by the root module
 // -------------------------
 use crate::player::{
-    handle_locomotion, JumpAction, LocomotionSettings, MoveAction, PlayerKinematics, PlayerProgress,
+    handle_player, JumpAction, PlayerSettings, MoveAction, PlayerKinematics, PlayerProgress,
     TurnAction,
 };
 use crate::ramp::{move_ramps, setup_ramp_spawner, spawn_moving_ramps, RampRenderAssets, RampSpawnConfig, RampSpawnState};
@@ -59,7 +59,7 @@ fn main() {
 
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.53, 0.81, 0.92)))
-        .insert_resource(LocomotionSettings::default())
+        .insert_resource(PlayerSettings::default())
         .insert_resource(PlayerKinematics::default())
         .insert_resource(PlayerProgress::default())
         .add_plugins(add_xr_plugins(
@@ -96,7 +96,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            handle_locomotion
+            handle_player
                 .run_if(openxr_session_running)
                 .run_if(resource_exists::<FloorParams>)
                 .run_if(resource_exists::<PlayerSpawn>)

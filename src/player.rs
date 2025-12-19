@@ -34,9 +34,9 @@ pub struct JumpAction;
 
 /// Tunable locomotion parameters (speed, turn rate, deadzone, jump impulse, gravity).
 ///
-/// These are applied in [`handle_locomotion`] every frame.
+/// These are applied in [`handle_player`] every frame.
 #[derive(Resource, Debug, Clone, Copy)]
-pub struct LocomotionSettings {
+pub struct PlayerSettings {
     pub move_speed_mps: f32,
     pub turn_speed_rad_s: f32,
     pub stick_deadzone: f32,
@@ -44,7 +44,7 @@ pub struct LocomotionSettings {
     pub gravity_mps2: f32,
 }
 
-impl Default for LocomotionSettings {
+impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
             // Faster so longer gaps are jumpable.
@@ -94,14 +94,14 @@ enum GroundKind {
 /// - Computes ground height from the road and from ramps
 /// - Carries the player by the underlying ramp velocity when grounded
 /// - If the player has touched a ramp and later touches the road, resets the run
-pub fn handle_locomotion(
+pub fn handle_player(
     move_query: Query<&XRUtilsActionState, With<MoveAction>>,
     turn_query: Query<&XRUtilsActionState, With<TurnAction>>,
     jump_query: Query<&XRUtilsActionState, With<JumpAction>>,
     mut xr_root: Query<&mut Transform, (With<XrTrackingRoot>, Without<MovingRamp>)>,
     time: Res<Time>,
     views: Option<Res<OxrViews>>,
-    settings: Res<LocomotionSettings>,
+    settings: Res<PlayerSettings>,
     spawn: Option<Res<PlayerSpawn>>,
     mut progress: ResMut<PlayerProgress>,
     road: Option<Res<FloorParams>>,

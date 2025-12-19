@@ -62,7 +62,7 @@ impl Default for RampSpawnConfig {
             lane_jitter_x: 0.35,
             z_speed_mps: 2.5,
             travel_distance_z: 90.0,
-            spawn_every_s: 1.6,
+            spawn_every_s: 1.6 / 0.6, //60%
         }
     }
 }
