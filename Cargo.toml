@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 bevy = { version = "0.17.3", default-features = false, features = [
     "png",
+    "debug",
     "android-native-activity",
     "android_shared_stdcxx",
     "bevy_winit", "bevy_pbr", "bevy_render",

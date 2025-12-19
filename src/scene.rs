@@ -4,6 +4,12 @@ use log::info;
 use crate::assets::{ProbeItem, TextureProbe};
 use crate::locomotion::MovingPlatform;
 
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct PlayerSpawn {
+    pub(crate) pos: Vec3,
+    pub(crate) rot: Quat,
+}
+
 // -------------------------
 // Floor + scene setup
 // -------------------------
@@ -103,6 +109,12 @@ pub(crate) fn setup_scene(
 
     let floor_top_y = 15.0_f32;
     let floor_center_y = floor_top_y - floor_thickness * 0.5;
+
+    // Player spawn point: on the main floor near the beginning of the run.
+    commands.insert_resource(PlayerSpawn {
+        pos: Vec3::new(0.0, floor_top_y, -40.0),
+        rot: Quat::IDENTITY,
+    });
 
     // Dark sides to read the cliff edge
     let floor_side_mat = materials.add(StandardMaterial {
