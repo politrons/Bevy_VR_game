@@ -21,11 +21,23 @@ pub enum RampProfile {
 
 impl RampProfile {
     fn is_up(self) -> bool {
-        matches!(self, RampProfile::Inclined { dir: RampSlopeDir::Up, .. })
+        matches!(
+            self,
+            RampProfile::Inclined {
+                dir: RampSlopeDir::Up,
+                ..
+            }
+        )
     }
 
     fn is_down(self) -> bool {
-        matches!(self, RampProfile::Inclined { dir: RampSlopeDir::Down, .. })
+        matches!(
+            self,
+            RampProfile::Inclined {
+                dir: RampSlopeDir::Down,
+                ..
+            }
+        )
     }
 }
 
@@ -101,12 +113,24 @@ impl MovingRamp {
 
     /// True if this ramp segment is an inclined UP ramp.
     pub fn is_inclined_up(&self) -> bool {
-        matches!(self.profile, RampProfile::Inclined { dir: RampSlopeDir::Up, .. })
+        matches!(
+            self.profile,
+            RampProfile::Inclined {
+                dir: RampSlopeDir::Up,
+                ..
+            }
+        )
     }
 
     /// True if this ramp segment is an inclined DOWN ramp.
     pub fn is_inclined_down(&self) -> bool {
-        matches!(self.profile, RampProfile::Inclined { dir: RampSlopeDir::Down, .. })
+        matches!(
+            self.profile,
+            RampProfile::Inclined {
+                dir: RampSlopeDir::Down,
+                ..
+            }
+        )
     }
 
     /// Returns the incline angle in degrees if this segment is inclined.
@@ -187,9 +211,9 @@ pub struct RampSpawnConfig {
 impl Default for RampSpawnConfig {
     fn default() -> Self {
         Self {
-            lanes: 5,
+            lanes: 4, // Ramps per row (lanes)
             lane_spacing_m: 2.2,
-            ramp_dimensions_m: Vec3::new(2.0, 0.25, 2.0),
+            ramp_dimensions_m: Vec3::new(2.0, 0.25, 3.38),
             inclined_length_multiplier: 2.2,
             z_spacing_m: 5.0,
             z_spawn_jitter_m: 3.0,
@@ -200,7 +224,7 @@ impl Default for RampSpawnConfig {
             ramp_speed_z_mps: 2.5,
             spawn_interval_s: 1.6 / 0.5, // Spawn more slowly (fewer ramps)
             max_vertical_step_cross_lane_m: 0.9,
-            flat_probability_mid_band: 0.45,
+            flat_probability_mid_band: 0.50,
             low_band_y_m: 3.0,
             high_band_y_m: 16.0,
             allowed_incline_angles_deg: [20.0, 30.0],
@@ -346,7 +370,8 @@ pub(crate) fn spawn_moving_ramps(
                 x = x.clamp(x_spawn_min, x_spawn_max);
 
                 // Build a path-continuous segment in this lane.
-                let (profile, start_y_rel, end_y_rel) = choose_next_lane_segment(&config, &mut state, lane);
+                let (profile, start_y_rel, end_y_rel) =
+                    choose_next_lane_segment(&config, &mut state, lane);
 
                 // Clamp to the previous lane end-Y for the same Z-step
                 // so sideways moves remain feasible.
@@ -392,14 +417,22 @@ pub(crate) fn spawn_moving_ramps(
     for lane in 0..config.lanes {
         let lane_center_x = lane_center_x(lane, config.lanes, config.lane_spacing_m);
         let mut x = lane_center_x
-            + rng_f32_range(&mut state.seed, -config.lane_x_jitter_m, config.lane_x_jitter_m);
+            + rng_f32_range(
+                &mut state.seed,
+                -config.lane_x_jitter_m,
+                config.lane_x_jitter_m,
+            );
         x = x.clamp(x_spawn_min, x_spawn_max);
 
         let (profile, start_y_rel, end_y_rel) = choose_next_lane_segment(&config, &mut state, lane);
         let end_y_rel = clamp_to_neighbor_lane(&config, end_y_rel, prev_lane_end_y);
 
         let mut z = z_spawn
-            + rng_f32_range(&mut state.seed, -config.z_spawn_jitter_m, config.z_spawn_jitter_m);
+            + rng_f32_range(
+                &mut state.seed,
+                -config.z_spawn_jitter_m,
+                config.z_spawn_jitter_m,
+            );
         z = z.clamp(z_spawn_min, z_spawn_max);
 
         spawn_one_ramp(
@@ -463,6 +496,17 @@ fn choose_next_lane_segment(
 
     let profile = choose_next_profile(config, state, lane, last, in_low_band, in_high_band);
 
+    // Hard rule: after an UP ramp, the next segment must not be another UP segment.
+    // Flat is allowed (same height), or Down is allowed (descend). This prevents impossible climbs.
+    let profile = if last.is_up() && profile.is_up() {
+        RampProfile::Inclined {
+            dir: RampSlopeDir::Down,
+            angle_deg: config.allowed_incline_angles_deg[0],
+        }
+    } else {
+        profile
+    };
+
     // The vertical delta depends on the *actual* segment length.
     let base_len_z = config.ramp_dimensions_m.z;
     let mut end_y_rel = start_y_rel;
@@ -518,16 +562,15 @@ fn choose_next_profile(
     let angle = {
         let idx = (rng_f32_01(&mut state.seed) * (config.allowed_incline_angles_deg.len() as f32))
             .floor()
-            .clamp(0.0, (config.allowed_incline_angles_deg.len() - 1) as f32) as usize;
+            .clamp(0.0, (config.allowed_incline_angles_deg.len() - 1) as f32)
+            as usize;
         config.allowed_incline_angles_deg[idx]
     };
 
-    // Flat chance depends on the band.
-    let mut flat_p = config.flat_probability_mid_band;
-    if in_low_band || in_high_band {
-        // Near extremes, reduce flat slightly so we correct height more often.
-        flat_p *= 0.65;
-    }
+    // Flat vs inclined probability.
+    // We keep this at an even 50/50 split so spawning does not bias toward one type.
+    // (Other hard rules below can still override direction to keep paths playable.)
+    let flat_p = config.flat_probability_mid_band;
 
     let r = rng_f32_01(&mut state.seed);
     if r < flat_p {
@@ -538,31 +581,49 @@ fn choose_next_profile(
     // - Low band: strongly prefer Up.
     // - High band: strongly prefer Down.
     // - Mid: neutral, but apply no UP->UP and no DOWN->DOWN.
-    let dir = if in_low_band {
-        // Allow long UP streaks.
-        if rng_f32_01(&mut state.seed) < 0.85 {
-            RampSlopeDir::Up
-        } else {
-            RampSlopeDir::Down
-        }
-    } else if in_high_band {
-        // Allow long DOWN streaks.
-        if rng_f32_01(&mut state.seed) < 0.85 {
-            RampSlopeDir::Down
-        } else {
-            RampSlopeDir::Up
-        }
-    } else {
-        // Mid band: enforce combinations.
-        // Forbid Up->Up and Down->Down.
-        match last {
-            RampProfile::Inclined { dir: RampSlopeDir::Up, .. } => RampSlopeDir::Down,
-            RampProfile::Inclined { dir: RampSlopeDir::Down, .. } => RampSlopeDir::Up,
-            RampProfile::Flat => {
-                if rng_f32_01(&mut state.seed) < 0.5 {
+    //
+    // Extra rule: if the previous segment was an UP ramp, the next segment must not end higher
+    // than the current height (otherwise it becomes very hard to reach). So we force the next
+    // inclined segment to be DOWN (flat is still allowed by `flat_p`).
+    let dir = match last {
+        RampProfile::Inclined {
+            dir: RampSlopeDir::Up,
+            ..
+        } => RampSlopeDir::Down,
+        _ => {
+            if in_low_band {
+                // Allow long UP streaks.
+                if rng_f32_01(&mut state.seed) < 0.85 {
                     RampSlopeDir::Up
                 } else {
                     RampSlopeDir::Down
+                }
+            } else if in_high_band {
+                // Allow long DOWN streaks.
+                if rng_f32_01(&mut state.seed) < 0.85 {
+                    RampSlopeDir::Down
+                } else {
+                    RampSlopeDir::Up
+                }
+            } else {
+                // Mid band: enforce combinations.
+                // Forbid Up->Up and Down->Down.
+                match last {
+                    RampProfile::Inclined {
+                        dir: RampSlopeDir::Up,
+                        ..
+                    } => RampSlopeDir::Down,
+                    RampProfile::Inclined {
+                        dir: RampSlopeDir::Down,
+                        ..
+                    } => RampSlopeDir::Up,
+                    RampProfile::Flat => {
+                        if rng_f32_01(&mut state.seed) < 0.5 {
+                            RampSlopeDir::Up
+                        } else {
+                            RampSlopeDir::Down
+                        }
+                    }
                 }
             }
         }
@@ -578,7 +639,10 @@ fn choose_next_profile(
         return RampProfile::Flat;
     }
 
-    RampProfile::Inclined { dir, angle_deg: angle }
+    RampProfile::Inclined {
+        dir,
+        angle_deg: angle,
+    }
 }
 
 fn spawn_one_ramp(
@@ -656,8 +720,13 @@ fn spawn_one_ramp(
 }
 
 fn clamp_to_neighbor_lane(config: &RampSpawnConfig, y: f32, neighbor_y: Option<f32>) -> f32 {
-    let Some(ny) = neighbor_y else { return y; };
-    y.clamp(ny - config.max_vertical_step_cross_lane_m, ny + config.max_vertical_step_cross_lane_m)
+    let Some(ny) = neighbor_y else {
+        return y;
+    };
+    y.clamp(
+        ny - config.max_vertical_step_cross_lane_m,
+        ny + config.max_vertical_step_cross_lane_m,
+    )
 }
 
 fn lane_center_x(lane: usize, lanes: usize, lane_spacing: f32) -> f32 {

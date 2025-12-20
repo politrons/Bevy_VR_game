@@ -3,6 +3,7 @@ use bevy_mod_openxr::resources::OxrViews;
 use bevy_mod_xr::session::XrTrackingRoot;
 use bevy_xr_utils::actions::XRUtilsActionState;
 
+
 use crate::ramp::MovingRamp;
 use crate::scene::{FloorParams, PlayerSpawn};
 
@@ -10,18 +11,22 @@ use crate::scene::{FloorParams, PlayerSpawn};
 // Ramp sliding tuning constants
 // -------------------------
 
-/// Extra acceleration applied from gravity when the player is standing on an inclined ramp.
+/// Extra acceleration multiplier applied from gravity when the player is standing on an inclined ramp.
 ///
-/// - `1.0` means "physical" projection only.
-/// - Values > 1.0 make ramps feel more slippery (faster downhill, harder uphill).
+/// - `1.0` means the pure physical projection.
+/// - `1.30` means ramps feel ~30% more slippery (faster downhill, harder uphill).
 const RAMP_SLIDE_ACCEL_MULT: f32 = 1.30;
 
 /// If the absolute ramp slope (dy/dz) is below this threshold, we treat the ramp as flat.
 /// This prevents applying the "slippery" multiplier on nearly-flat surfaces.
 const RAMP_SLOPE_EPS: f32 = 1.0e-4;
 
-/// Per-second drag applied to ramp sliding velocity. Higher = more friction, lower = more sliding.
-const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.60;
+/// Per-second drag applied to ramp sliding velocity.
+///
+/// Higher = more friction, lower = more sliding.
+///
+/// We keep this slightly lower to make inclined ramps ~30% more slippery.
+const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.46;
 
 /// Small velocity threshold to snap ramp sliding velocity to zero (reduces tiny jitter).
 const RAMP_SLIDE_VEL_EPS: f32 = 0.03;
@@ -35,6 +40,7 @@ const PUSH_SPEED_MULT: f32 = 2.0;
 
 /// Duration (seconds) of the push boost once triggered.
 const PUSH_DURATION_S: f32 = 0.30;
+
 
 // -------------------------
 // XR input marker components
@@ -70,6 +76,8 @@ pub struct JumpAction;
 /// The system reads [`XRUtilsActionState::Bool`] and uses rising-edge detection to trigger a short boost.
 #[derive(Component)]
 pub struct PushAction;
+
+
 
 
 // -------------------------

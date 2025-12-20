@@ -31,3 +31,7 @@ bevy_mod_openxr = "0.4"
 bevy_mod_xr = "0.4"
 bevy_xr_utils = "0.4"
 log = "0.4.29"
+
+# Physics (for real collision between the player and ramps)
+# We'll wire the plugin + colliders in `lib.rs` next.
+bevy_rapier3d = { version = "0.31.0", default-features = false, features = ["dim3", "simd-stable"] }
