@@ -27,6 +27,16 @@ const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.60;
 const RAMP_SLIDE_VEL_EPS: f32 = 0.03;
 
 // -------------------------
+// Push tuning constants
+// -------------------------
+
+/// Speed multiplier applied while a push boost is active.
+const PUSH_SPEED_MULT: f32 = 2.0;
+
+/// Duration (seconds) of the push boost once triggered.
+const PUSH_DURATION_S: f32 = 0.30;
+
+// -------------------------
 // XR input marker components
 // -------------------------
 
@@ -54,6 +64,12 @@ pub struct SprintAction;
 /// The system reads [`XRUtilsActionState::Bool`] and uses edge-detection to trigger a jump.
 #[derive(Component)]
 pub struct JumpAction;
+
+/// Marker component attached to the XR action entity that provides the push (speed boost) input.
+///
+/// The system reads [`XRUtilsActionState::Bool`] and uses rising-edge detection to trigger a short boost.
+#[derive(Component)]
+pub struct PushAction;
 
 
 // -------------------------
@@ -99,6 +115,10 @@ pub struct PlayerKinematics {
     pub ramp_velocity_z: f32,
     /// Last frame's jump button state. Used for robust edge-detection on all runtimes.
     pub prev_jump_pressed: bool,
+    /// Last frame's push button state. Used for robust edge-detection on all runtimes.
+    pub prev_push_pressed: bool,
+    /// Remaining time (seconds) for the active push boost.
+    pub push_time_left_s: f32,
 }
 
 /// Tracks whether the player has already stepped onto a ramp.
@@ -133,6 +153,7 @@ pub fn handle_player(
     move_query: Query<&XRUtilsActionState, With<MoveAction>>,
     turn_query: Query<&XRUtilsActionState, With<TurnAction>>,
     jump_query: Query<&XRUtilsActionState, With<JumpAction>>,
+    push_query: Query<&XRUtilsActionState, With<PushAction>>,
     sprint_query: Query<&XRUtilsActionState, With<SprintAction>>,
     mut xr_root: Query<&mut Transform, (With<XrTrackingRoot>, Without<MovingRamp>)>,
     time: Res<Time>,
@@ -193,6 +214,28 @@ pub fn handle_player(
     let jump_pressed_edge = jump_pressed_now && !kin.prev_jump_pressed;
     kin.prev_jump_pressed = jump_pressed_now;
 
+    // We do our own rising-edge detection for push as well.
+    let push_pressed_now = push_query
+        .iter()
+        .find_map(|s| match s {
+            XRUtilsActionState::Bool(b) => Some(b.current_state),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    let push_pressed_edge = push_pressed_now && !kin.prev_push_pressed;
+    kin.prev_push_pressed = push_pressed_now;
+
+    // Start (or restart) a short speed boost on push.
+    if push_pressed_edge {
+        kin.push_time_left_s = PUSH_DURATION_S;
+    }
+
+    // Count down boost timer.
+    if kin.push_time_left_s > 0.0 {
+        kin.push_time_left_s = (kin.push_time_left_s - dt).max(0.0);
+    }
+
     let sprint_pressed = sprint_query
         .iter()
         .find_map(|s| match s {
@@ -201,11 +244,14 @@ pub fn handle_player(
         })
         .unwrap_or(false);
 
-
     // Sprint is a sustained speed multiplier while the grip is held.
     let sprint_mul = if sprint_pressed { 1.3 } else { 1.0 };
 
-    let speed_mul = sprint_mul;
+    // Push is a short boost (edge-triggered) that temporarily increases movement speed.
+    let push_mul = if kin.push_time_left_s > 0.0 { PUSH_SPEED_MULT } else { 1.0 };
+
+    // Combine multipliers.
+    let speed_mul = sprint_mul * push_mul;
 
     let Some((head_yaw, pivot_local)) = head_yaw_and_pivot(&views) else {
         return;
@@ -357,6 +403,8 @@ pub fn handle_player(
         kin.ramp_velocity_z = 0.0;
         // Reset button-edge state so the next press is detected correctly after respawn.
         kin.prev_jump_pressed = false;
+        kin.prev_push_pressed = false;
+        kin.push_time_left_s = 0.0;
         progress.has_touched_ramp = false;
         return;
     }

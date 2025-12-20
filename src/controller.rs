@@ -3,7 +3,7 @@ use bevy_xr_utils::actions::{
     ActionType, ActiveSet, XRUtilsAction, XRUtilsActionSet, XRUtilsBinding,
 };
 
-use crate::player::{JumpAction, MoveAction, SprintAction, TurnAction};
+use crate::player::{JumpAction, MoveAction, PushAction, SprintAction, TurnAction};
 
 /// Spawns XR action entities for locomotion and gameplay.
 ///
@@ -126,6 +126,37 @@ pub fn create_action_entities(mut commands: Commands) {
     commands.entity(jump_action).add_child(jump_binding_a_click_oculus);
     commands.entity(jump_action).add_child(jump_binding_a_click_meta);
 
+    // Push: right controller B button.
+    //
+    // IMPORTANT: use `/click` (not `/touch`) to avoid “always pressed” behavior.
+    let push_action = commands
+        .spawn((
+            XRUtilsAction {
+                action_name: "push".into(),
+                localized_name: "Push".into(),
+                action_type: ActionType::Bool,
+            },
+            PushAction,
+        ))
+        .id();
+
+    let push_binding_b_click_oculus = commands
+        .spawn(XRUtilsBinding {
+            profile: "/interaction_profiles/oculus/touch_controller".into(),
+            binding: "/user/hand/right/input/b/click".into(),
+        })
+        .id();
+
+    let push_binding_b_click_meta = commands
+        .spawn(XRUtilsBinding {
+            profile: "/interaction_profiles/meta/touch_controller".into(),
+            binding: "/user/hand/right/input/b/click".into(),
+        })
+        .id();
+
+    commands.entity(push_action).add_child(push_binding_b_click_oculus);
+    commands.entity(push_action).add_child(push_binding_b_click_meta);
+
     // Sprint: use LEFT thumbstick click (very reliable Bool binding).
     //
     // You previously asked for the "upper trigger" (left grip). That path is runtime-dependent
@@ -163,5 +194,6 @@ pub fn create_action_entities(mut commands: Commands) {
     commands.entity(set).add_child(move_action);
     commands.entity(set).add_child(turn_action);
     commands.entity(set).add_child(jump_action);
+    commands.entity(set).add_child(push_action);
     commands.entity(set).add_child(sprint_action);
 }
