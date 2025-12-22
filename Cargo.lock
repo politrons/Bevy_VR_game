@@ -1257,6 +1257,7 @@ dependencies = [
  "bevy_rapier3d",
  "bevy_xr_utils",
  "log",
+ "openxr",
 ]
 
 [[package]]

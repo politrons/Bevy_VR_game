@@ -30,6 +30,7 @@ android_logger = "0.13"
 bevy_mod_openxr = "0.4"
 bevy_mod_xr = "0.4"
 bevy_xr_utils = "0.4"
+openxr = "0.19"
 log = "0.4.29"
 
 # Physics (for real collision between the player and ramps)

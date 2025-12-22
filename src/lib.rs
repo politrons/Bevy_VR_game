@@ -38,6 +38,7 @@ pub fn setup_logging() {
 // -------------------------
 
 mod assets;
+mod controller_cubes;
 mod player;
 mod ramp;
 mod scene;
@@ -49,6 +50,7 @@ use crate::player::{
     handle_player, PlayerKinematics, PlayerProgress, PlayerSettings
     ,
 };
+use crate::controller_cubes::register_controller_cubes;
 use crate::ramp::{move_ramps, setup_ramp_spawner, spawn_moving_ramps, RampRenderAssets, RampSpawnConfig, RampSpawnState};
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
@@ -58,7 +60,8 @@ use crate::scene::{
 fn main() {
     setup_logging();
 
-    App::new()
+    let mut app = App::new();
+    app
         .insert_resource(ClearColor(Color::srgb(0.53, 0.81, 0.92)))
         .insert_resource(PlayerSettings::default())
         .insert_resource(PlayerKinematics::default())
@@ -104,7 +107,9 @@ fn main() {
                 .run_if(resource_exists::<PlayerProgress>)
                 .run_if(resource_exists::<OxrViews>),
         )
-        .run();
+        ;
+    register_controller_cubes(&mut app);
+    app.run();
 }
 
 // -------------------------
