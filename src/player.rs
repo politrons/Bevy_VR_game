@@ -40,6 +40,8 @@ const PUSH_SPEED_MULT: f32 = 2.0;
 
 /// Duration (seconds) of the push boost once triggered.
 const PUSH_DURATION_S: f32 = 0.30;
+/// Cooldown (seconds) before another push boost can trigger.
+const PUSH_COOLDOWN_S: f32 = 1.0;
 
 
 // -------------------------
@@ -127,6 +129,8 @@ pub struct PlayerKinematics {
     pub prev_push_pressed: bool,
     /// Remaining time (seconds) for the active push boost.
     pub push_time_left_s: f32,
+    /// Remaining cooldown (seconds) before another push boost can trigger.
+    pub push_cooldown_s: f32,
 }
 
 /// Tracks whether the player has already stepped onto a ramp.
@@ -234,14 +238,19 @@ pub fn handle_player(
     let push_pressed_edge = push_pressed_now && !kin.prev_push_pressed;
     kin.prev_push_pressed = push_pressed_now;
 
-    // Start (or restart) a short speed boost on push.
-    if push_pressed_edge {
+    // Start a short speed boost on push if the cooldown has expired.
+    if push_pressed_edge && kin.push_cooldown_s <= 0.0 {
         kin.push_time_left_s = PUSH_DURATION_S;
+        kin.push_cooldown_s = PUSH_COOLDOWN_S;
     }
 
     // Count down boost timer.
     if kin.push_time_left_s > 0.0 {
         kin.push_time_left_s = (kin.push_time_left_s - dt).max(0.0);
+    }
+    // Count down cooldown timer.
+    if kin.push_cooldown_s > 0.0 {
+        kin.push_cooldown_s = (kin.push_cooldown_s - dt).max(0.0);
     }
 
     let sprint_pressed = sprint_query
@@ -413,6 +422,7 @@ pub fn handle_player(
         kin.prev_jump_pressed = false;
         kin.prev_push_pressed = false;
         kin.push_time_left_s = 0.0;
+        kin.push_cooldown_s = 0.0;
         progress.has_touched_ramp = false;
         return;
     }

@@ -79,7 +79,7 @@ pub(crate) fn setup_scene(
     // Road/floor parameters
     // Half the previous size (width and length)
     let floor_len = 50.0_f32;
-    let floor_with = 10.0_f32;
+    let floor_with = 12.0_f32;
     let floor_thickness = 0.2_f32;
 
     let floor_top_y = 15.0_f32;

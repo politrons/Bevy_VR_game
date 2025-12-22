@@ -237,7 +237,7 @@ pub struct RampSpawnConfig {
 impl Default for RampSpawnConfig {
     fn default() -> Self {
         Self {
-            lanes: 2, // Two lanes (ramps per row)
+            lanes: 3, // Three lanes (ramps per row)
             lane_spacing_m: 4.0,
             ramp_dimensions_m: Vec3::new(2.0, 0.25, 3.38),
             inclined_length_multiplier: 2.2,
