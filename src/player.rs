@@ -32,6 +32,8 @@ const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.46;
 
 /// Small velocity threshold to snap ramp sliding velocity to zero (reduces tiny jitter).
 const RAMP_SLIDE_VEL_EPS: f32 = 0.03;
+/// Require the player to be above the ramp surface to "land" on it (prevents side grabs).
+const RAMP_ABOVE_EPS: f32 = 0.12;
 
 // -------------------------
 // Push tuning constants
@@ -108,7 +110,7 @@ impl Default for PlayerSettings {
             turn_speed_rad_s: 120.0_f32.to_radians(),
             stick_deadzone: 0.15,
             // Higher jump so vertical steps feel fair.
-            jump_velocity_mps: 5.98,
+            jump_velocity_mps: 5.023,
             gravity_mps2: -9.81,
         }
     }
@@ -414,13 +416,13 @@ pub fn handle_player(
         && prev_y > ground_y + 0.08
         && root.translation.y <= ground_y + snap_eps;
 
-    // Track progress: only mark ramp progress on a real landing.
-    if kind == GroundKind::Ramp && landed_this_frame {
+    // Track progress: if you're grounded on a ramp, consider it "touched".
+    if kind == GroundKind::Ramp && grounded {
         progress.has_touched_ramp = true;
     }
 
-    if grounded && kind == GroundKind::Road && progress.has_touched_ramp {
-        // Failure condition: fell off ramps and touched the main floor again.
+    if grounded && kind == GroundKind::Road {
+        // Failure condition: touching the main floor always resets.
         root.translation = spawn.pos;
         root.rotation = spawn.rot;
         kin.vertical_velocity = 0.0;
@@ -494,6 +496,10 @@ fn ground_y_and_velocity(
             let Some(top_surface_y) = r.surface_top_y_at(pos.z) else {
                 continue;
             };
+            // Only consider the ramp if the player is above its surface.
+            if pos.y + RAMP_ABOVE_EPS < top_surface_y {
+                continue;
+            }
             // dy/dz slope of the ramp surface (positive means it rises as Z increases).
             // Used to apply a gravity component along the ramp direction.
             let slope_dy_dz = r.surface_slope_dy_dz();
