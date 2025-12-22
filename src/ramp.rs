@@ -543,13 +543,7 @@ fn choose_next_lane_segment(
 
     let profile = choose_next_profile(config, state, lane, last, in_low_band, in_high_band);
 
-    // Hard rule: after an UP ramp, the next segment must not be another UP segment.
-    // With DOWN disabled, we fall back to Flat to avoid overly steep climbs.
-    let mut profile = if last.is_up() && profile.is_up() {
-        RampProfile::Flat
-    } else {
-        profile
-    };
+    let mut profile = profile;
 
     // The vertical delta depends on the *actual* segment length.
     let base_len_z = config.ramp_dimensions_m.z;
@@ -582,9 +576,15 @@ fn choose_next_lane_segment(
             let rise = angle_rad.sin() * len_z;
             match dir {
                 // Align the *highest* point of an UP ramp to the previous height.
+                // If the last segment was also UP, anchor below its lowest endpoint.
                 RampSlopeDir::Up => {
-                    end_y_rel = prev_anchor_y_rel;
-                    start_y_rel = prev_anchor_y_rel - rise;
+                    let up_anchor_y_rel = if last.is_up() {
+                        last_low_y_rel
+                    } else {
+                        prev_anchor_y_rel
+                    };
+                    end_y_rel = up_anchor_y_rel;
+                    start_y_rel = up_anchor_y_rel - rise;
 
                     // If the lower end would hit the floor, fall back to a higher flat segment.
                     if start_y_rel < config.min_height_above_floor_m {
@@ -659,6 +659,15 @@ fn choose_next_profile(
 
     let r = rng_f32_01(&mut state.seed);
     if r < flat_p {
+        return RampProfile::Flat;
+    }
+
+    // Height-based chance to allow an UP ramp: 0 at min height, 1 at max height.
+    let min_y = config.min_height_above_floor_m;
+    let max_y = config.max_height_above_floor_m;
+    let denom = (max_y - min_y).max(f32::EPSILON);
+    let height_t = ((state.lane_next_y[lane] - min_y) / denom).clamp(0.0, 1.0);
+    if rng_f32_01(&mut state.seed) > height_t {
         return RampProfile::Flat;
     }
 
