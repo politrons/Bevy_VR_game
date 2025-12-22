@@ -247,8 +247,8 @@ impl Default for RampSpawnConfig {
             min_height_above_floor_m: 1.0,
             max_height_above_floor_m: 20.0,
             lane_x_jitter_m: 0.8,
-            ramp_speed_z_mps: 2.5,
-            spawn_interval_s: 1.6 / 0.5, // Spawn more slowly (fewer ramps)
+            ramp_speed_z_mps: 5.0,
+            spawn_interval_s: 1.6 / 1.0, // Adjusted for faster ramps to keep spacing
             max_vertical_step_cross_lane_m: 0.9,
             flat_probability_mid_band: 0.50,
             low_band_y_m: 3.0,

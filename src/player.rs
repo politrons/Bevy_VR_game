@@ -16,6 +16,8 @@ use crate::scene::{FloorParams, PlayerSpawn};
 /// - `1.0` means the pure physical projection.
 /// - `1.30` means ramps feel ~30% more slippery (faster downhill, harder uphill).
 const RAMP_SLIDE_ACCEL_MULT: f32 = 1.30;
+/// Additional multiplier for UP ramps (positive slope) to make climbs more slippery.
+const RAMP_SLIDE_UP_MULT: f32 = 2.0;
 
 /// If the absolute ramp slope (dy/dz) is below this threshold, we treat the ramp as flat.
 /// This prevents applying the "slippery" multiplier on nearly-flat surfaces.
@@ -350,6 +352,9 @@ pub fn handle_player(
                 // We explicitly avoid applying it on nearly-flat ramps.
                 if m.abs() > RAMP_SLOPE_EPS {
                     a_z *= RAMP_SLIDE_ACCEL_MULT;
+                    if m > 0.0 {
+                        a_z *= RAMP_SLIDE_UP_MULT;
+                    }
                 }
 
                 // Apply drag in a frame-rate stable way.
@@ -379,6 +384,9 @@ pub fn handle_player(
             // Make inclined ramps more slippery.
             if m.abs() > RAMP_SLOPE_EPS {
                 a_z *= RAMP_SLIDE_ACCEL_MULT;
+                if m > 0.0 {
+                    a_z *= RAMP_SLIDE_UP_MULT;
+                }
             }
 
             kin.ramp_velocity_z = (kin.ramp_velocity_z + a_z * dt) * (-RAMP_SLIDE_DRAG_PER_SEC * dt).exp();
