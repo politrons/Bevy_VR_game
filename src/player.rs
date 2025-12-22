@@ -18,6 +18,8 @@ use crate::scene::{FloorParams, PlayerSpawn};
 const RAMP_SLIDE_ACCEL_MULT: f32 = 1.30;
 /// Additional multiplier for UP ramps (positive slope) to make climbs more slippery.
 const RAMP_SLIDE_UP_MULT: f32 = 2.0;
+/// Additional multiplier for DOWN ramps (negative slope), relative to UP ramps.
+const RAMP_SLIDE_DOWN_MULT: f32 = 0.5;
 
 /// If the absolute ramp slope (dy/dz) is below this threshold, we treat the ramp as flat.
 /// This prevents applying the "slippery" multiplier on nearly-flat surfaces.
@@ -355,6 +357,8 @@ pub fn handle_player(
                     a_z *= RAMP_SLIDE_ACCEL_MULT;
                     if m > 0.0 {
                         a_z *= RAMP_SLIDE_UP_MULT;
+                    } else if m < 0.0 {
+                        a_z *= RAMP_SLIDE_DOWN_MULT;
                     }
                 }
 
@@ -387,6 +391,8 @@ pub fn handle_player(
                 a_z *= RAMP_SLIDE_ACCEL_MULT;
                 if m > 0.0 {
                     a_z *= RAMP_SLIDE_UP_MULT;
+                } else if m < 0.0 {
+                    a_z *= RAMP_SLIDE_DOWN_MULT;
                 }
             }
 

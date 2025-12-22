@@ -137,17 +137,6 @@ impl MovingRamp {
         (self.segment_y_end - self.segment_y_start) / len
     }
 
-    /// True if this ramp segment is an inclined UP ramp.
-    pub fn is_inclined_up(&self) -> bool {
-        matches!(
-            self.profile,
-            RampProfile::Inclined {
-                dir: RampSlopeDir::Up,
-                ..
-            }
-        )
-    }
-
     /// True if this ramp segment is an inclined DOWN ramp.
     pub fn is_inclined_down(&self) -> bool {
         matches!(
@@ -353,8 +342,9 @@ pub(crate) fn spawn_moving_ramps(
     // Ramp footprint bounds (we only spawn if the whole ramp is above the floor).
     let ramp_half_x = config.ramp_dimensions_m.x * 0.5;
     // Use the *largest* possible Z half-extent so we never spawn a ramp that would hang off the floor.
-    // Downhill ramps are intentionally longer (x1.30), so we must budget for that here.
-    let max_z_mult = (config.inclined_length_multiplier * 1.30).max(config.inclined_length_multiplier * 0.70);
+    // Uphill ramps are intentionally longer than downhill ones.
+    let max_z_mult =
+        (config.inclined_length_multiplier * 0.70).max(config.inclined_length_multiplier * 0.70);
     let ramp_half_z = (config.ramp_dimensions_m.z * max_z_mult) * 0.5;
 
     let x_spawn_min = x_min + ramp_half_x;
@@ -440,7 +430,7 @@ pub(crate) fn spawn_moving_ramps(
                 );
 
                 // Update continuity state to the actual end.
-                state.lane_next_y[lane] = end_y_rel;
+                state.lane_next_y[lane] = next_lane_anchor_y(profile, start_y_rel, end_y_rel);
                 state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
                 prev_lane_end_y = Some(end_y_rel);
             }
@@ -493,7 +483,7 @@ pub(crate) fn spawn_moving_ramps(
             profile,
         );
 
-        state.lane_next_y[lane] = end_y_rel;
+        state.lane_next_y[lane] = next_lane_anchor_y(profile, start_y_rel, end_y_rel);
         state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
         prev_lane_end_y = Some(end_y_rel);
     }
@@ -567,10 +557,10 @@ fn choose_next_lane_segment(
             let angle_rad = angle_deg.to_radians();
 
             // Reduce UP ramp length by 30% (makes climbs less "long/rectangular").
-            // Downhill ramps are intentionally longer (x1.30) to feel more like a descent.
+            // Downhill ramps are intentionally shorter (x0.70) to make drops snappier.
             let len_z = match dir {
                 RampSlopeDir::Up => base_len_z * config.inclined_length_multiplier * 0.70,
-                RampSlopeDir::Down => base_len_z * config.inclined_length_multiplier * 1.30,
+                RampSlopeDir::Down => base_len_z * config.inclined_length_multiplier * 0.70,
             };
 
             let rise = angle_rad.sin() * len_z;
@@ -594,8 +584,15 @@ fn choose_next_lane_segment(
                     }
                 }
                 RampSlopeDir::Down => {
-                    start_y_rel = prev_anchor_y_rel;
-                    end_y_rel = prev_anchor_y_rel - rise;
+                    // Align the highest point of a DOWN ramp to the same baseline
+                    // a flat/up segment would start at.
+                    start_y_rel = next_anchor_y_rel;
+                    end_y_rel = next_anchor_y_rel - rise;
+                    if end_y_rel < config.min_height_above_floor_m {
+                        profile = RampProfile::Flat;
+                        start_y_rel = next_anchor_y_rel;
+                        end_y_rel = next_anchor_y_rel;
+                    }
                 }
             }
         }
@@ -667,14 +664,23 @@ fn choose_next_profile(
     let max_y = config.max_height_above_floor_m;
     let denom = (max_y - min_y).max(f32::EPSILON);
     let height_t = ((state.lane_next_y[lane] - min_y) / denom).clamp(0.0, 1.0);
-    if rng_f32_01(&mut state.seed) > height_t {
-        return RampProfile::Flat;
-    }
+    // Bias UP when high, DOWN when low (slightly stronger than linear).
+    let bias_pow = 1.3;
+    let up_bias = height_t.powf(bias_pow);
+    let down_bias = (1.0 - height_t).powf(bias_pow) * 0.49;
+    let up_prob = if up_bias + down_bias > 0.0 {
+        up_bias / (up_bias + down_bias)
+    } else {
+        0.5
+    };
 
-    RampProfile::Inclined {
-        dir: RampSlopeDir::Up,
-        angle_deg: angle,
-    }
+    let dir = if rng_f32_01(&mut state.seed) < up_prob {
+        RampSlopeDir::Up
+    } else {
+        RampSlopeDir::Down
+    };
+
+    RampProfile::Inclined { dir, angle_deg: angle }
 }
 
 fn spawn_one_ramp(
@@ -689,17 +695,6 @@ fn spawn_one_ramp(
     z_end: f32,
     profile: RampProfile,
 ) {
-    // Skip rendering/spawning downhill ramps entirely.
-    if matches!(
-        profile,
-        RampProfile::Inclined {
-            dir: RampSlopeDir::Down,
-            ..
-        }
-    ) {
-        return;
-    }
-
     let half_x = config.ramp_dimensions_m.x * 0.5;
     let base_half_z = config.ramp_dimensions_m.z * 0.5;
     let thickness = config.ramp_dimensions_m.y;
@@ -711,11 +706,11 @@ fn spawn_one_ramp(
             dir: RampSlopeDir::Up,
             ..
         } => config.inclined_length_multiplier * 0.70,
-        // Downhill: 30% longer
+        // Downhill: 30% shorter
         RampProfile::Inclined {
             dir: RampSlopeDir::Down,
             ..
-        } => config.inclined_length_multiplier * 1.30,
+        } => config.inclined_length_multiplier * 0.70,
         RampProfile::Flat => 1.0,
     };
 
@@ -856,6 +851,14 @@ fn enforce_profile_monotonic(profile: RampProfile, start_y_rel: f32, end_y_rel: 
 fn lane_center_x(lane: usize, lanes: usize, lane_spacing: f32) -> f32 {
     let lanes_f = lanes as f32;
     (lane as f32 - (lanes_f - 1.0) * 0.5) * lane_spacing
+}
+
+fn next_lane_anchor_y(profile: RampProfile, start_y_rel: f32, end_y_rel: f32) -> f32 {
+    if profile.is_down() {
+        start_y_rel
+    } else {
+        end_y_rel
+    }
 }
 
 fn lane_safe_x_jitter_m(config: &RampSpawnConfig) -> f32 {
