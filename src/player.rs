@@ -110,7 +110,7 @@ impl Default for PlayerSettings {
             turn_speed_rad_s: 120.0_f32.to_radians(),
             stick_deadzone: 0.15,
             // Higher jump so vertical steps feel fair.
-            jump_velocity_mps: 5.023,
+            jump_velocity_mps: 6.028,
             gravity_mps2: -9.81,
         }
     }
@@ -297,9 +297,8 @@ pub fn handle_player(
     // Move input in the direction the head is facing.
     // IMPORTANT: we compute the desired direction now, but we apply it later once we know
     // whether we're on the road or on an inclined ramp.
-    let move_x = apply_deadzone(move_xy[0], settings.stick_deadzone);
-    let move_y = apply_deadzone(move_xy[1], settings.stick_deadzone);
-    let move_input = Vec3::new(move_x, 0.0, -move_y);
+    let move_xy = apply_deadzone_vec2(Vec2::new(move_xy[0], move_xy[1]), settings.stick_deadzone);
+    let move_input = Vec3::new(move_xy.x, 0.0, -move_xy.y);
 
     let desired_world_dir = if move_input.length_squared() > 0.0 {
         let world_yaw = root.rotation * head_yaw;
@@ -542,6 +541,15 @@ fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
 fn apply_deadzone(v: f32, deadzone: f32) -> f32 {
     if v.abs() < deadzone {
         0.0
+    } else {
+        v
+    }
+}
+
+fn apply_deadzone_vec2(v: Vec2, deadzone: f32) -> Vec2 {
+    let len = v.length();
+    if len < deadzone {
+        Vec2::ZERO
     } else {
         v
     }
