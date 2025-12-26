@@ -136,25 +136,7 @@ impl MovingRamp {
         }
         (self.segment_y_end - self.segment_y_start) / len
     }
-
-    /// True if this ramp segment is an inclined DOWN ramp.
-    pub fn is_inclined_down(&self) -> bool {
-        matches!(
-            self.profile,
-            RampProfile::Inclined {
-                dir: RampSlopeDir::Down,
-                ..
-            }
-        )
-    }
-
-    /// Returns the incline angle in degrees if this segment is inclined.
-    pub fn incline_angle_deg(&self) -> Option<f32> {
-        match self.profile {
-            RampProfile::Inclined { angle_deg, .. } => Some(angle_deg),
-            RampProfile::Flat => None,
-        }
-    }
+    
 }
 
 /// Render assets shared by all ramps.
@@ -683,6 +665,7 @@ fn choose_next_profile(
     RampProfile::Inclined { dir, angle_deg: angle }
 }
 
+/// Spawns a single ramp entity and sets its surface metadata.
 fn spawn_one_ramp(
     commands: &mut Commands,
     assets: &RampRenderAssets,
@@ -782,6 +765,7 @@ fn spawn_one_ramp(
     ));
 }
 
+/// Clamp the end height to a neighbor lane so lateral moves stay reasonable.
 fn clamp_to_neighbor_lane(
     config: &RampSpawnConfig,
     profile: RampProfile,
@@ -806,6 +790,7 @@ fn clamp_to_neighbor_lane(
     (profile, end_y_rel)
 }
 
+/// Enforces the slope direction; if clamped past it, fall back to Flat.
 fn enforce_profile_monotonic(profile: RampProfile, start_y_rel: f32, end_y_rel: f32) -> (RampProfile, f32) {
     match profile {
         RampProfile::Inclined {
@@ -848,11 +833,13 @@ fn enforce_profile_monotonic(profile: RampProfile, start_y_rel: f32, end_y_rel: 
     }
 }
 
+/// Returns the world X center for a lane index.
 fn lane_center_x(lane: usize, lanes: usize, lane_spacing: f32) -> f32 {
     let lanes_f = lanes as f32;
     (lane as f32 - (lanes_f - 1.0) * 0.5) * lane_spacing
 }
 
+/// Returns the next anchor height for continuity between segments.
 fn next_lane_anchor_y(profile: RampProfile, start_y_rel: f32, end_y_rel: f32) -> f32 {
     if profile.is_down() {
         start_y_rel
@@ -861,6 +848,7 @@ fn next_lane_anchor_y(profile: RampProfile, start_y_rel: f32, end_y_rel: f32) ->
     }
 }
 
+/// Caps lane jitter so adjacent lanes do not overlap.
 fn lane_safe_x_jitter_m(config: &RampSpawnConfig) -> f32 {
     // Keep a small margin so ramps in adjacent lanes never overlap.
     let margin = 0.05;
@@ -869,12 +857,14 @@ fn lane_safe_x_jitter_m(config: &RampSpawnConfig) -> f32 {
     config.lane_x_jitter_m.min(max_jitter)
 }
 
+/// Deterministic LCG used for ramp spawning randomness.
 fn rng_u32(seed: &mut u32) -> u32 {
     // Simple LCG.
     *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
     *seed
 }
 
+/// Returns a random float in [0, 1) using the LCG.
 fn rng_f32_01(seed: &mut u32) -> f32 {
     let v = rng_u32(seed);
     // Keep 24 bits for a stable float in [0,1).
@@ -882,6 +872,7 @@ fn rng_f32_01(seed: &mut u32) -> f32 {
     (mant as f32) / ((1u32 << 24) as f32)
 }
 
+/// Returns a random float in [min, max) using the LCG.
 fn rng_f32_range(seed: &mut u32, min: f32, max: f32) -> f32 {
     min + (max - min) * rng_f32_01(seed)
 }

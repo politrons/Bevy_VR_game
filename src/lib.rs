@@ -38,7 +38,6 @@ pub fn setup_logging() {
 // -------------------------
 
 mod assets;
-mod controller_cubes;
 mod player;
 mod ramp;
 mod scene;
@@ -50,7 +49,7 @@ use crate::player::{
     handle_player, PlayerKinematics, PlayerProgress, PlayerSettings
     ,
 };
-use crate::controller_cubes::register_controller_cubes;
+use crate::controller::register_controller_cubes;
 use crate::ramp::{move_ramps, setup_ramp_spawner, spawn_moving_ramps, RampRenderAssets, RampSpawnConfig, RampSpawnState};
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
@@ -116,6 +115,7 @@ fn main() {
 // XR camera tuning (right-eye flicker fix)
 // -------------------------
 
+/// Tweaks XR camera settings to avoid right-eye flicker artifacts.
 fn tune_xr_cameras(mut commands: Commands, mut cams: Query<(Entity, &mut Camera, &XrCamera)>) {
     for (e, mut cam, _xr_cam) in &mut cams {
         cam.is_active = true;

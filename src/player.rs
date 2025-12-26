@@ -416,11 +416,6 @@ pub fn handle_player(
     let snap_eps = 0.06;
     let mut grounded = (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05;
 
-    // Detect a true landing: coming from above and crossing onto the surface while descending.
-    let landed_this_frame = kin.vertical_velocity <= 0.05
-        && prev_y > ground_y + 0.08
-        && root.translation.y <= ground_y + snap_eps;
-
     // Track progress: if you're grounded on a ramp, consider it "touched".
     if kind == GroundKind::Ramp && grounded {
         progress.has_touched_ramp = true;
@@ -474,7 +469,7 @@ pub fn handle_player(
     }
 }
 
-/// Returns the surface Y, surface velocity, ground kind, and slope dy/dz under the player.
+/// Returns the best ground under the player (height, surface velocity, kind, slope).
 fn ground_y_and_velocity(
     pos: Vec3,
     road: &FloorParams,
@@ -521,6 +516,7 @@ fn ground_y_and_velocity(
     (best_y, best_vel, best_kind, best_slope_dy_dz)
 }
 
+/// Extracts head yaw and a horizontal pivot point for turning-in-place.
 fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
     if views.is_empty() {
         return None;
@@ -544,6 +540,7 @@ fn head_yaw_and_pivot(views: &OxrViews) -> Option<(Quat, Vec3)> {
     Some((yaw, pivot))
 }
 
+/// Applies a scalar deadzone to a stick axis.
 fn apply_deadzone(v: f32, deadzone: f32) -> f32 {
     if v.abs() < deadzone {
         0.0
@@ -552,6 +549,7 @@ fn apply_deadzone(v: f32, deadzone: f32) -> f32 {
     }
 }
 
+/// Applies a radial deadzone to a stick vector.
 fn apply_deadzone_vec2(v: Vec2, deadzone: f32) -> Vec2 {
     let len = v.length();
     if len < deadzone {

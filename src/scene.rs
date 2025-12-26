@@ -74,7 +74,6 @@ pub(crate) fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     _images: ResMut<Assets<Image>>,
-    asset_server: Res<AssetServer>,
 ) {
     // Road/floor parameters
     // Half the previous size (width and length)
