@@ -1,6 +1,7 @@
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
 
+use crate::gameplay::{DownhillPhase, GameplayMode, GameplayState};
 use crate::scene::{FloorParams, FloorTopY};
 
 /// Ramp slope direction.
@@ -216,7 +217,7 @@ impl Default for RampSpawnConfig {
             z_spawn_jitter_m: 3.0,
             initial_ramps_per_lane: 6,
             min_height_above_floor_m: 1.0,
-            max_height_above_floor_m: 20.0,
+            max_height_above_floor_m: 40.0,
             lane_x_jitter_m: 0.8,
             ramp_speed_z_mps: 5.0,
             spawn_interval_s: 1.6 / 1.0, // Adjusted for faster ramps to keep spacing
@@ -312,7 +313,14 @@ pub(crate) fn spawn_moving_ramps(
     config: Res<RampSpawnConfig>,
     mut state: ResMut<RampSpawnState>,
     assets: Res<RampRenderAssets>,
+    gameplay: Option<ResMut<GameplayState>>,
 ) {
+    let mut gameplay = gameplay;
+    let mode = gameplay
+        .as_ref()
+        .map(|g| g.current)
+        .unwrap_or(GameplayMode::RandomGameplay);
+
     let floor_top_y = floor_top_y.map(|r| r.0).unwrap_or(0.0);
 
     // Floor bounds.
@@ -362,6 +370,15 @@ pub(crate) fn spawn_moving_ramps(
                 break;
             }
 
+            let (phase, down_angle_deg) = if mode == GameplayMode::DownhillGameplay {
+                let Some(gameplay) = gameplay.as_mut() else {
+                    return;
+                };
+                downhill_plan_for_row(&config, &state, gameplay)
+            } else {
+                (DownhillPhase::FlatUp, None)
+            };
+
             let mut prev_lane_end_y: Option<f32> = None;
 
             for lane in 0..config.lanes {
@@ -372,8 +389,18 @@ pub(crate) fn spawn_moving_ramps(
                 x = x.clamp(x_spawn_min, x_spawn_max);
 
                 // Build a path-continuous segment in this lane.
-                let (profile, start_y_rel, end_y_rel) =
-                    choose_next_lane_segment(&config, &mut state, lane);
+                let (profile, start_y_rel, end_y_rel) = match mode {
+                    GameplayMode::RandomGameplay => {
+                        choose_next_lane_segment(&config, &mut state, lane)
+                    }
+                    GameplayMode::DownhillGameplay => choose_next_lane_segment_downhill(
+                        &config,
+                        &state,
+                        lane,
+                        phase,
+                        down_angle_deg,
+                    ),
+                };
 
                 // Clamp to the previous lane end-Y for the same Z-step
                 // so sideways moves remain feasible.
@@ -411,8 +438,17 @@ pub(crate) fn spawn_moving_ramps(
                     profile,
                 );
 
+                update_lane_history(&mut state, lane, profile);
                 // Update continuity state to the actual end.
-                state.lane_next_y[lane] = next_lane_anchor_y(profile, start_y_rel, end_y_rel);
+                state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+                    if profile.is_up() {
+                        start_y_rel
+                    } else {
+                        end_y_rel
+                    }
+                } else {
+                    next_lane_anchor_y(profile, start_y_rel, end_y_rel)
+                };
                 state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
                 prev_lane_end_y = Some(end_y_rel);
             }
@@ -426,6 +462,15 @@ pub(crate) fn spawn_moving_ramps(
     }
     state.accum_s = 0.0;
 
+    let (phase, down_angle_deg) = if mode == GameplayMode::DownhillGameplay {
+        let Some(gameplay) = gameplay.as_mut() else {
+            return;
+        };
+        downhill_plan_for_row(&config, &state, gameplay)
+    } else {
+        (DownhillPhase::FlatUp, None)
+    };
+
     let mut prev_lane_end_y: Option<f32> = None;
 
     for lane in 0..config.lanes {
@@ -434,7 +479,16 @@ pub(crate) fn spawn_moving_ramps(
             lane_center_x + rng_f32_range(&mut state.seed, -lane_x_jitter, lane_x_jitter);
         x = x.clamp(x_spawn_min, x_spawn_max);
 
-        let (profile, start_y_rel, end_y_rel) = choose_next_lane_segment(&config, &mut state, lane);
+        let (profile, start_y_rel, end_y_rel) = match mode {
+            GameplayMode::RandomGameplay => choose_next_lane_segment(&config, &mut state, lane),
+            GameplayMode::DownhillGameplay => choose_next_lane_segment_downhill(
+                &config,
+                &state,
+                lane,
+                phase,
+                down_angle_deg,
+            ),
+        };
         let (profile, end_y_rel) = clamp_to_neighbor_lane(
             &config,
             profile,
@@ -465,7 +519,16 @@ pub(crate) fn spawn_moving_ramps(
             profile,
         );
 
-        state.lane_next_y[lane] = next_lane_anchor_y(profile, start_y_rel, end_y_rel);
+        update_lane_history(&mut state, lane, profile);
+        state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+            if profile.is_up() {
+                start_y_rel
+            } else {
+                end_y_rel
+            }
+        } else {
+            next_lane_anchor_y(profile, start_y_rel, end_y_rel)
+        };
         state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
         prev_lane_end_y = Some(end_y_rel);
     }
@@ -597,7 +660,11 @@ fn choose_next_lane_segment(
         end_y_rel = config.min_height_above_floor_m;
     }
 
-    // Update lane history.
+    (profile, start_y_rel, end_y_rel)
+}
+
+/// Updates per-lane profile history and streak counters.
+fn update_lane_history(state: &mut RampSpawnState, lane: usize, profile: RampProfile) {
     state.lane_last_profile[lane] = profile;
     if profile.is_up() {
         state.lane_up_streak[lane] = state.lane_up_streak[lane].saturating_add(1);
@@ -610,8 +677,125 @@ fn choose_next_lane_segment(
         state.lane_up_streak[lane] = 0;
         state.lane_down_streak[lane] = 0;
     }
+}
 
-    (profile, start_y_rel, end_y_rel)
+/// Computes the phase and optional downhill angle for the next spawn row.
+fn downhill_plan_for_row(
+    config: &RampSpawnConfig,
+    state: &RampSpawnState,
+    gameplay: &mut GameplayState,
+) -> (DownhillPhase, Option<f32>) {
+    let mut phase = refresh_downhill_phase(config, state, gameplay);
+    let mut down_angle_deg = None;
+
+    if phase == DownhillPhase::DownRamps {
+        down_angle_deg = select_downhill_angle_deg(config, state);
+        if down_angle_deg.is_none() {
+            gameplay.downhill_phase = DownhillPhase::FlatUp;
+            phase = DownhillPhase::FlatUp;
+        }
+    }
+
+    (phase, down_angle_deg)
+}
+
+/// Switches phases when all lanes reach the top or bottom bounds.
+fn refresh_downhill_phase(
+    config: &RampSpawnConfig,
+    state: &RampSpawnState,
+    gameplay: &mut GameplayState,
+) -> DownhillPhase {
+    let max_y = config.max_height_above_floor_m;
+    let min_y = config.min_height_above_floor_m;
+    let eps = 0.02;
+
+    match gameplay.downhill_phase {
+        DownhillPhase::FlatUp => {
+            if state.lane_next_y.iter().all(|y| *y >= max_y - eps) {
+                gameplay.downhill_phase = DownhillPhase::DownRamps;
+            }
+        }
+        DownhillPhase::DownRamps => {
+            if state.lane_next_y.iter().all(|y| *y <= min_y + eps) {
+                gameplay.downhill_phase = DownhillPhase::FlatUp;
+            }
+        }
+    }
+
+    gameplay.downhill_phase
+}
+
+/// Picks a downhill angle that keeps all lanes above the minimum height.
+fn select_downhill_angle_deg(config: &RampSpawnConfig, state: &RampSpawnState) -> Option<f32> {
+    if state.lane_next_y.is_empty() {
+        return None;
+    }
+
+    let min_y = config.min_height_above_floor_m;
+    let mut max_drop = f32::INFINITY;
+    for y in &state.lane_next_y {
+        max_drop = max_drop.min(*y - min_y);
+    }
+    if max_drop <= 0.0 {
+        return None;
+    }
+
+    let len_z = config.ramp_dimensions_m.z * config.inclined_length_multiplier * 0.70;
+    let mut best_angle = None;
+    let mut best_rise = 0.0;
+    for angle_deg in config.allowed_incline_angles_deg {
+        let rise = angle_deg.to_radians().sin() * len_z;
+        if rise <= max_drop + 1e-3 && rise >= best_rise {
+            best_rise = rise;
+            best_angle = Some(angle_deg);
+        }
+    }
+
+    if best_angle.is_some() {
+        return best_angle;
+    }
+
+    // If no allowed angle fits, use a shallower angle to hit the minimum exactly.
+    let ratio = (max_drop / len_z).clamp(0.0, 1.0);
+    Some(ratio.asin().to_degrees())
+}
+
+/// Chooses the next segment for DownhillGameplay (flat-up then incline ramps).
+fn choose_next_lane_segment_downhill(
+    config: &RampSpawnConfig,
+    state: &RampSpawnState,
+    lane: usize,
+    phase: DownhillPhase,
+    down_angle_deg: Option<f32>,
+) -> (RampProfile, f32, f32) {
+    let prev_anchor_y_rel = state.lane_next_y[lane];
+    let flat_step_m = config.max_vertical_step_cross_lane_m;
+
+    match phase {
+        DownhillPhase::FlatUp => {
+            let next_y_rel =
+                (prev_anchor_y_rel + flat_step_m).min(config.max_height_above_floor_m);
+            (RampProfile::Flat, next_y_rel, next_y_rel)
+        }
+        DownhillPhase::DownRamps => {
+            let Some(angle_deg) = down_angle_deg else {
+                let min_y = config.min_height_above_floor_m;
+                return (RampProfile::Flat, min_y, min_y);
+            };
+            let len_z = config.ramp_dimensions_m.z * config.inclined_length_multiplier * 0.70;
+            let rise = angle_deg.to_radians().sin() * len_z;
+            let end_y_rel = prev_anchor_y_rel;
+            let start_y_rel = prev_anchor_y_rel - rise;
+            (
+                RampProfile::Inclined {
+                    dir: RampSlopeDir::Up,
+                    angle_deg,
+                },
+                start_y_rel,
+                end_y_rel,
+            )
+        }
+    }
 }
 
 /// Decide the next RampProfile using the combination rules and altitude bands.
