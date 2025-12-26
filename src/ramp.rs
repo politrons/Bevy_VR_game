@@ -378,6 +378,12 @@ pub(crate) fn spawn_moving_ramps(
             } else {
                 (DownhillPhase::FlatUp, None)
             };
+            let skip_lane =
+                if mode == GameplayMode::DownhillGameplay && config.lanes > 1 {
+                    Some((rng_u32(&mut state.seed) as usize) % config.lanes)
+                } else {
+                    None
+                };
 
             let mut prev_lane_end_y: Option<f32> = None;
 
@@ -425,6 +431,22 @@ pub(crate) fn spawn_moving_ramps(
                     );
                 z = z.clamp(z_spawn_min, z_spawn_max);
 
+                if skip_lane == Some(lane) {
+                    update_lane_history(&mut state, lane, profile);
+                    state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+                        if profile.is_up() {
+                            start_y_rel
+                        } else {
+                            end_y_rel
+                        }
+                    } else {
+                        next_lane_anchor_y(profile, start_y_rel, end_y_rel)
+                    };
+                    state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
+                    prev_lane_end_y = Some(end_y_rel);
+                    continue;
+                }
+
                 spawn_one_ramp(
                     &mut commands,
                     &assets,
@@ -471,6 +493,12 @@ pub(crate) fn spawn_moving_ramps(
         (DownhillPhase::FlatUp, None)
     };
 
+    let skip_lane = if mode == GameplayMode::DownhillGameplay && config.lanes > 1 {
+        Some((rng_u32(&mut state.seed) as usize) % config.lanes)
+    } else {
+        None
+    };
+
     let mut prev_lane_end_y: Option<f32> = None;
 
     for lane in 0..config.lanes {
@@ -505,6 +533,22 @@ pub(crate) fn spawn_moving_ramps(
                 config.z_spawn_jitter_m,
             );
         z = z.clamp(z_spawn_min, z_spawn_max);
+
+        if skip_lane == Some(lane) {
+            update_lane_history(&mut state, lane, profile);
+            state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+                if profile.is_up() {
+                    start_y_rel
+                } else {
+                    end_y_rel
+                }
+            } else {
+                next_lane_anchor_y(profile, start_y_rel, end_y_rel)
+            };
+            state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
+            prev_lane_end_y = Some(end_y_rel);
+            continue;
+        }
 
         spawn_one_ramp(
             &mut commands,
