@@ -400,7 +400,7 @@ pub(crate) fn spawn_moving_ramps(
                 break;
             }
 
-            let (phase, down_angle_deg) = if mode == GameplayMode::DownhillGameplay {
+            let (phase, down_angle_deg) = if is_downhill_like(mode) {
                 let Some(gameplay) = gameplay.as_mut() else {
                     return;
                 };
@@ -408,12 +408,11 @@ pub(crate) fn spawn_moving_ramps(
             } else {
                 (DownhillPhase::FlatUp, None)
             };
-            let skip_lane =
-                if mode == GameplayMode::DownhillGameplay && config.lanes > 1 {
-                    Some((rng_u32(&mut state.seed) as usize) % config.lanes)
-                } else {
-                    None
-                };
+            let skip_lane = if is_downhill_like(mode) && config.lanes > 1 {
+                Some((rng_u32(&mut state.seed) as usize) % config.lanes)
+            } else {
+                None
+            };
 
             let mut prev_lane_end_y: Option<f32> = None;
 
@@ -435,6 +434,15 @@ pub(crate) fn spawn_moving_ramps(
                         lane,
                         phase,
                         down_angle_deg,
+                        RampProfile::Flat,
+                    ),
+                    GameplayMode::JumpGameplay => choose_next_lane_segment_downhill(
+                        &config,
+                        &state,
+                        lane,
+                        phase,
+                        down_angle_deg,
+                        RampProfile::Jump,
                     ),
                 };
 
@@ -463,7 +471,7 @@ pub(crate) fn spawn_moving_ramps(
 
                 if skip_lane == Some(lane) {
                     update_lane_history(&mut state, lane, profile);
-                    state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+                    state.lane_next_y[lane] = if is_downhill_like(mode) {
                         if profile.is_up() {
                             start_y_rel
                         } else {
@@ -492,7 +500,7 @@ pub(crate) fn spawn_moving_ramps(
 
                 update_lane_history(&mut state, lane, profile);
                 // Update continuity state to the actual end.
-                state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+                state.lane_next_y[lane] = if is_downhill_like(mode) {
                     if profile.is_up() {
                         start_y_rel
                     } else {
@@ -514,7 +522,7 @@ pub(crate) fn spawn_moving_ramps(
     }
     state.accum_s = 0.0;
 
-    let (phase, down_angle_deg) = if mode == GameplayMode::DownhillGameplay {
+    let (phase, down_angle_deg) = if is_downhill_like(mode) {
         let Some(gameplay) = gameplay.as_mut() else {
             return;
         };
@@ -523,7 +531,7 @@ pub(crate) fn spawn_moving_ramps(
         (DownhillPhase::FlatUp, None)
     };
 
-    let skip_lane = if mode == GameplayMode::DownhillGameplay && config.lanes > 1 {
+    let skip_lane = if is_downhill_like(mode) && config.lanes > 1 {
         Some((rng_u32(&mut state.seed) as usize) % config.lanes)
     } else {
         None
@@ -545,6 +553,15 @@ pub(crate) fn spawn_moving_ramps(
                 lane,
                 phase,
                 down_angle_deg,
+                RampProfile::Flat,
+            ),
+            GameplayMode::JumpGameplay => choose_next_lane_segment_downhill(
+                &config,
+                &state,
+                lane,
+                phase,
+                down_angle_deg,
+                RampProfile::Jump,
             ),
         };
         let (profile, end_y_rel) = clamp_to_neighbor_lane(
@@ -566,7 +583,7 @@ pub(crate) fn spawn_moving_ramps(
 
         if skip_lane == Some(lane) {
             update_lane_history(&mut state, lane, profile);
-            state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+            state.lane_next_y[lane] = if is_downhill_like(mode) {
                 if profile.is_up() {
                     start_y_rel
                 } else {
@@ -594,7 +611,7 @@ pub(crate) fn spawn_moving_ramps(
         );
 
         update_lane_history(&mut state, lane, profile);
-        state.lane_next_y[lane] = if mode == GameplayMode::DownhillGameplay {
+        state.lane_next_y[lane] = if is_downhill_like(mode) {
             if profile.is_up() {
                 start_y_rel
             } else {
@@ -630,6 +647,10 @@ pub(crate) fn move_ramps(
             commands.entity(e).despawn();
         }
     }
+}
+
+fn is_downhill_like(mode: GameplayMode) -> bool {
+    matches!(mode, GameplayMode::DownhillGameplay | GameplayMode::JumpGameplay)
 }
 
 /// Chooses the next segment profile for a lane and returns (profile, start_y_rel, end_y_rel).
@@ -834,22 +855,28 @@ fn select_downhill_angle_deg(config: &RampSpawnConfig, state: &RampSpawnState) -
     Some(ratio.asin().to_degrees())
 }
 
-/// Chooses the next segment for DownhillGameplay (flat-up then incline ramps).
+/// Chooses the next segment for downhill-style gameplay (flat/jump-up then incline ramps).
 fn choose_next_lane_segment_downhill(
     config: &RampSpawnConfig,
     state: &RampSpawnState,
     lane: usize,
     phase: DownhillPhase,
     down_angle_deg: Option<f32>,
+    flat_profile: RampProfile,
 ) -> (RampProfile, f32, f32) {
     let prev_anchor_y_rel = state.lane_next_y[lane];
     let flat_step_m = config.max_vertical_step_cross_lane_m;
+    let flat_profile = if flat_profile.is_flat_like() {
+        flat_profile
+    } else {
+        RampProfile::Flat
+    };
 
     match phase {
         DownhillPhase::FlatUp => {
             let next_y_rel =
                 (prev_anchor_y_rel + flat_step_m).min(config.max_height_above_floor_m);
-            (RampProfile::Flat, next_y_rel, next_y_rel)
+            (flat_profile, next_y_rel, next_y_rel)
         }
         DownhillPhase::DownRamps => {
             let Some(angle_deg) = down_angle_deg else {

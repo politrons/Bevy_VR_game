@@ -7,6 +7,8 @@ pub enum GameplayMode {
     RandomGameplay,
     /// Deterministic flow: flat climb to max, then incline ramps to min.
     DownhillGameplay,
+    /// Deterministic flow: jump pads climb to max, then incline ramps to min.
+    JumpGameplay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +20,7 @@ pub enum DownhillPhase {
 }
 
 const DEFAULT_MODES: [GameplayMode; 1] = [
-    GameplayMode::RandomGameplay,
+    GameplayMode::JumpGameplay,
 ];
 const DEFAULT_SWITCH_INTERVAL_S: f32 = 120.0;
 const DEFAULT_SEED: u32 = 0xA5A5_1234;
@@ -65,7 +67,9 @@ pub(crate) fn update_gameplay_mode(time: Res<Time>, mut state: ResMut<GameplaySt
         idx = (idx + 1) % state.modes.len();
     }
     let next = state.modes[idx];
-    if next != state.current && next == GameplayMode::DownhillGameplay {
+    if next != state.current
+        && matches!(next, GameplayMode::DownhillGameplay | GameplayMode::JumpGameplay)
+    {
         state.downhill_phase = DownhillPhase::FlatUp;
     }
     state.current = next;
