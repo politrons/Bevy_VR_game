@@ -4,7 +4,7 @@ use bevy_mod_xr::session::XrTrackingRoot;
 use bevy_xr_utils::actions::XRUtilsActionState;
 
 
-use crate::ramp::MovingRamp;
+use crate::ramp::{MovingRamp, RampFootprint, RampProfile};
 use crate::scene::{FloorParams, PlayerSpawn};
 
 // -------------------------
@@ -152,6 +152,7 @@ pub struct PlayerProgress {
 enum GroundKind {
     Road,
     Ramp,
+    JumpRamp,
 }
 
 // -------------------------
@@ -331,7 +332,7 @@ pub fn handle_player(
                 // Leaving ramps: decay any leftover ramp velocity quickly.
                 kin.ramp_velocity_z *= 0.6;
             }
-            GroundKind::Ramp => {
+            GroundKind::Ramp | GroundKind::JumpRamp => {
                 // Allow strafing freely in X.
                 root.translation.x += desired_world_dir.x * (settings.move_speed_mps * speed_mul) * dt;
 
@@ -375,7 +376,7 @@ pub fn handle_player(
         }
     } else {
         // No input: still slide on ramps, stand still on the road.
-        if kind_before == GroundKind::Ramp {
+        if matches!(kind_before, GroundKind::Ramp | GroundKind::JumpRamp) {
             let m = slope_dy_dz_before;
             let slope_denom = 1.0 + m * m;
 
@@ -415,9 +416,10 @@ pub fn handle_player(
     // they are not moving upward. This avoids counting side-swipes as a "landing".
     let snap_eps = 0.06;
     let mut grounded = (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05;
+    let mut landed_this_frame = grounded && prev_y > ground_y + snap_eps;
 
     // Track progress: if you're grounded on a ramp, consider it "touched".
-    if kind == GroundKind::Ramp && grounded {
+    if matches!(kind, GroundKind::Ramp | GroundKind::JumpRamp) && grounded {
         progress.has_touched_ramp = true;
     }
 
@@ -465,7 +467,15 @@ pub fn handle_player(
             root.translation.y = ground_y;
             kin.vertical_velocity = 0.0;
             kin.prev_y = ground_y;
+            landed_this_frame = true;
         }
+    }
+
+    // Jump pads auto-launch you when you land on them.
+    if landed_this_frame && kind == GroundKind::JumpRamp {
+        kin.vertical_velocity = settings.jump_velocity_mps * 3.0;
+        kin.ramp_velocity_z = 0.0;
+        grounded = false;
     }
 }
 
@@ -484,32 +494,45 @@ fn ground_y_and_velocity(
     for (t, r) in ramps.iter() {
         let center = t.translation;
 
-        // Ramps are axis-aligned rectangles in X/Z, but may be inclined in Y along Z.
+        // Ramps use simple footprints in X/Z (rect or circle), and may be inclined in Y along Z.
         // We compute the surface height under the player by interpolating along Z.
         let dx = (pos.x - center.x).abs();
         let dz_local = pos.z - center.z;
         let dz_abs = dz_local.abs();
 
-        if dx <= r.half_extents.x && dz_abs <= r.half_extents.y {
-            // Ask the ramp for the top surface height at this world Z.
-            // Returns `None` if the ramp has no valid surface at that Z (e.g., degenerate).
-            let Some(top_surface_y) = r.surface_top_y_at(pos.z) else {
-                continue;
-            };
-            // Only consider the ramp if the player is above its surface.
-            if pos.y + RAMP_ABOVE_EPS < top_surface_y {
-                continue;
+        let inside = match r.footprint {
+            RampFootprint::Rect => dx <= r.half_extents.x && dz_abs <= r.half_extents.y,
+            RampFootprint::Circle => {
+                let radius = r.half_extents.x.min(r.half_extents.y);
+                dx * dx + dz_abs * dz_abs <= radius * radius
             }
-            // dy/dz slope of the ramp surface (positive means it rises as Z increases).
-            // Used to apply a gravity component along the ramp direction.
-            let slope_dy_dz = r.surface_slope_dy_dz();
+        };
+        if !inside {
+            continue;
+        }
 
-            if top_surface_y > best_y {
-                best_y = top_surface_y;
-                best_vel = r.current_vel;
-                best_kind = GroundKind::Ramp;
-                best_slope_dy_dz = slope_dy_dz;
-            }
+        // Ask the ramp for the top surface height at this world Z.
+        // Returns `None` if the ramp has no valid surface at that Z (e.g., degenerate).
+        let Some(top_surface_y) = r.surface_top_y_at(pos.z) else {
+            continue;
+        };
+        // Only consider the ramp if the player is above its surface.
+        if pos.y + RAMP_ABOVE_EPS < top_surface_y {
+            continue;
+        }
+        // dy/dz slope of the ramp surface (positive means it rises as Z increases).
+        // Used to apply a gravity component along the ramp direction.
+        let slope_dy_dz = r.surface_slope_dy_dz();
+
+        if top_surface_y > best_y {
+            best_y = top_surface_y;
+            best_vel = r.current_vel;
+            best_kind = if r.profile == RampProfile::Jump {
+                GroundKind::JumpRamp
+            } else {
+                GroundKind::Ramp
+            };
+            best_slope_dy_dz = slope_dy_dz;
         }
     }
 

@@ -16,6 +16,8 @@ pub enum RampSlopeDir {
 pub enum RampProfile {
     /// A flat platform (no incline).
     Flat,
+    /// A flat jump pad that auto-launches the player.
+    Jump,
     /// An inclined ramp segment.
     Inclined { dir: RampSlopeDir, angle_deg: f32 },
 }
@@ -40,16 +42,29 @@ impl RampProfile {
             }
         )
     }
+
+    fn is_flat_like(self) -> bool {
+        matches!(self, RampProfile::Flat | RampProfile::Jump)
+    }
+}
+
+/// Footprint shape for ramp surface checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RampFootprint {
+    Rect,
+    Circle,
 }
 
 /// Component attached to every moving ramp.
 ///
 /// Ramps only move forward (+Z). X is decided at spawn time and never changes.
-/// Y is represented by a *segment* (start/end) which can be flat or inclined.
+/// Y is represented by a *segment* (start/end) which can be flat, jump, or inclined.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct MovingRamp {
     /// Half-extents in X/Z for simple footprint tests.
     pub half_extents: Vec2,
+    /// Footprint shape used for surface tests.
+    pub footprint: RampFootprint,
     /// Thickness in Y.
     pub thickness: f32,
 
@@ -63,7 +78,7 @@ pub struct MovingRamp {
     /// Current velocity of the ramp (world-space). Updated every frame.
     pub current_vel: Vec3,
 
-    /// The ramp profile (flat or inclined).
+    /// The ramp profile (flat, jump, or inclined).
     pub profile: RampProfile,
 
     /// Segment Z bounds in world space (used by player to evaluate surface height).
@@ -80,7 +95,7 @@ impl MovingRamp {
     ///
     /// This is the helper the player uses to decide whether it is standing on the ramp.
     ///
-    /// - For a [`RampProfile::Flat`] segment, the surface is constant.
+    /// - For a [`RampProfile::Flat`] or [`RampProfile::Jump`] segment, the surface is constant.
     /// - For an inclined segment, the surface is linearly interpolated between `segment_y_start`
     ///   and `segment_y_end` across `[segment_z_start, segment_z_end]`.
     ///
@@ -105,7 +120,7 @@ impl MovingRamp {
         // This is equivalent to linear interpolation between start/end, but makes the intent explicit
         // and stays correct even if (for any reason) start/end heights end up swapped.
         let top_y = match self.profile {
-            RampProfile::Flat => self.segment_y_start,
+            RampProfile::Flat | RampProfile::Jump => self.segment_y_start,
             RampProfile::Inclined {
                 dir: RampSlopeDir::Down,
                 ..
@@ -144,6 +159,7 @@ impl MovingRamp {
 #[derive(Resource, Clone)]
 pub struct RampRenderAssets {
     pub mesh: Handle<Mesh>,
+    pub jump_mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
 }
 
@@ -193,6 +209,8 @@ pub struct RampSpawnConfig {
 
     /// Base probability of spawning a flat segment in the mid-band.
     pub flat_probability_mid_band: f32,
+    /// Chance for a flat segment to become a jump pad (RandomGameplay only).
+    pub jump_probability: f32,
 
     /// Y band (relative to floor top): below this we allow long UP streaks.
     pub low_band_y_m: f32,
@@ -223,6 +241,7 @@ impl Default for RampSpawnConfig {
             spawn_interval_s: 1.6 / 1.0, // Adjusted for faster ramps to keep spacing
             max_vertical_step_cross_lane_m: 0.9,
             flat_probability_mid_band: 0.50,
+            jump_probability: 0.15,
             low_band_y_m: 3.0,
             high_band_y_m: 16.0,
             allowed_incline_angles_deg: [20.0, 30.0],
@@ -281,6 +300,12 @@ pub(crate) fn setup_ramp_spawner(
         config.ramp_dimensions_m.y,
         config.ramp_dimensions_m.z,
     ));
+    let jump_radius = config
+        .ramp_dimensions_m
+        .x
+        .min(config.ramp_dimensions_m.z)
+        * 0.5;
+    let jump_mesh = meshes.add(Cylinder::new(jump_radius, config.ramp_dimensions_m.y));
 
     let ramp_material = materials.add(StandardMaterial {
         // Different from floor on purpose.
@@ -292,6 +317,7 @@ pub(crate) fn setup_ramp_spawner(
 
     commands.insert_resource(RampRenderAssets {
         mesh: ramp_mesh,
+        jump_mesh,
         material: ramp_material,
     });
     commands.insert_resource(config);
@@ -632,7 +658,7 @@ fn choose_next_lane_segment(
     let mut end_y_rel = prev_anchor_y_rel;
 
     match profile {
-        RampProfile::Flat => {
+        RampProfile::Flat | RampProfile::Jump => {
             start_y_rel = next_anchor_y_rel;
             end_y_rel = next_anchor_y_rel;
         }
@@ -688,7 +714,7 @@ fn choose_next_lane_segment(
     }
 
     // After an UP ramp, a flat segment must not be above the low endpoint of that ramp.
-    if profile == RampProfile::Flat && last.is_up() {
+    if profile.is_flat_like() && last.is_up() {
         let flat_y = last_low_y_rel.clamp(
             config.min_height_above_floor_m,
             config.max_height_above_floor_m,
@@ -717,7 +743,7 @@ fn update_lane_history(state: &mut RampSpawnState, lane: usize, profile: RampPro
         state.lane_down_streak[lane] = state.lane_down_streak[lane].saturating_add(1);
         state.lane_up_streak[lane] = 0;
     } else {
-        // Flat breaks both streaks.
+        // Flat or jump pads break both streaks.
         state.lane_up_streak[lane] = 0;
         state.lane_down_streak[lane] = 0;
     }
@@ -861,11 +887,14 @@ fn choose_next_profile(
     };
 
     // Flat vs inclined probability.
-    // We keep this at the configured split so spawning does not bias toward one type.
+    // Jump pads are a subset of flat ramps so the overall split stays stable.
     let flat_p = config.flat_probability_mid_band;
 
     let r = rng_f32_01(&mut state.seed);
     if r < flat_p {
+        if rng_f32_01(&mut state.seed) < config.jump_probability {
+            return RampProfile::Jump;
+        }
         return RampProfile::Flat;
     }
 
@@ -906,9 +935,21 @@ fn spawn_one_ramp(
     z_end: f32,
     profile: RampProfile,
 ) {
-    let half_x = config.ramp_dimensions_m.x * 0.5;
-    let base_half_z = config.ramp_dimensions_m.z * 0.5;
     let thickness = config.ramp_dimensions_m.y;
+    let (half_x, base_half_z) = match profile {
+        RampProfile::Jump => {
+            let radius = config
+                .ramp_dimensions_m
+                .x
+                .min(config.ramp_dimensions_m.z)
+                * 0.5;
+            (radius, radius)
+        }
+        _ => (
+            config.ramp_dimensions_m.x * 0.5,
+            config.ramp_dimensions_m.z * 0.5,
+        ),
+    };
 
     // Flat uses the base length; inclined is stretched along Z.
     let z_multiplier = match profile {
@@ -922,7 +963,7 @@ fn spawn_one_ramp(
             dir: RampSlopeDir::Down,
             ..
         } => config.inclined_length_multiplier * 0.70,
-        RampProfile::Flat => 1.0,
+        RampProfile::Flat | RampProfile::Jump => 1.0,
     };
 
     let half_z = base_half_z * z_multiplier;
@@ -932,7 +973,7 @@ fn spawn_one_ramp(
     // Because the ramp mesh is a rotated cuboid, its translation.y is NOT the top surface.
     // We adjust the mesh center so that the rendered top surface endpoints match y_start/y_end.
     let center_y = match profile {
-        RampProfile::Flat => {
+        RampProfile::Flat | RampProfile::Jump => {
             // Flat: top surface is simply center + thickness/2
             (y_start + y_end) * 0.5 - thickness * 0.5
         }
@@ -951,7 +992,7 @@ fn spawn_one_ramp(
     let mut transform = Transform::from_translation(Vec3::new(x, center_y, z));
 
     match profile {
-        RampProfile::Flat => {
+        RampProfile::Flat | RampProfile::Jump => {
             // No rotation.
         }
         RampProfile::Inclined { dir, angle_deg } => {
@@ -973,12 +1014,22 @@ fn spawn_one_ramp(
     let segment_z_start = z - half_extents.y;
     let segment_z_end = z + half_extents.y;
 
+    let mesh = match profile {
+        RampProfile::Jump => assets.jump_mesh.clone(),
+        _ => assets.mesh.clone(),
+    };
+    let footprint = match profile {
+        RampProfile::Jump => RampFootprint::Circle,
+        _ => RampFootprint::Rect,
+    };
+
     commands.spawn((
-        Mesh3d(assets.mesh.clone()),
+        Mesh3d(mesh),
         MeshMaterial3d(assets.material.clone()),
         transform,
         MovingRamp {
             half_extents,
+            footprint,
             thickness,
             z_speed_mps: config.ramp_speed_z_mps,
             z_min: z_start,
@@ -1058,6 +1109,7 @@ fn enforce_profile_monotonic(profile: RampProfile, start_y_rel: f32, end_y_rel: 
             }
         }
         RampProfile::Flat => (RampProfile::Flat, end_y_rel),
+        RampProfile::Jump => (RampProfile::Jump, end_y_rel),
     }
 }
 
