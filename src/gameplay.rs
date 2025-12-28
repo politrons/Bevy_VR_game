@@ -19,7 +19,9 @@ pub enum DownhillPhase {
     DownRamps,
 }
 
-const DEFAULT_MODES: [GameplayMode; 1] = [
+const DEFAULT_MODES: [GameplayMode; 3] = [
+    GameplayMode::RandomGameplay,
+    GameplayMode::DownhillGameplay,
     GameplayMode::JumpGameplay,
 ];
 const DEFAULT_SWITCH_INTERVAL_S: f32 = 120.0;
