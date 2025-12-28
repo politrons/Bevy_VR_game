@@ -16,7 +16,7 @@ use bevy_xr_utils::actions::{
 };
 use openxr::Posef;
 
-use crate::player::{JumpAction, MoveAction, PushAction, SprintAction, TurnAction};
+use crate::player::{JumpAction, MoveAction, PushAction, ShootAction, SprintAction, TurnAction};
 
 /// Spawns XR action entities for locomotion and gameplay.
 ///
@@ -26,7 +26,7 @@ use crate::player::{JumpAction, MoveAction, PushAction, SprintAction, TurnAction
 /// Key design notes:
 /// - `ActionType::Vector` is used for thumbsticks.
 /// - `ActionType::Bool` is used for click-like inputs.
-/// - This project/version does NOT support `ActionType::Scalar`.
+/// - We use `ActionType::Float` for analog inputs (trigger values).
 ///
 /// If inputs appear "dead" on device, the most common causes are:
 /// - the set is not marked `ActiveSet`, or
@@ -170,6 +170,39 @@ pub fn create_action_entities(mut commands: Commands) {
     commands.entity(push_action).add_child(push_binding_b_click_oculus);
     commands.entity(push_action).add_child(push_binding_b_click_meta);
 
+    // Shoot: right trigger value (upper trigger).
+    let shoot_action = commands
+        .spawn((
+            XRUtilsAction {
+                action_name: "shoot".into(),
+                localized_name: "Shoot".into(),
+                action_type: ActionType::Float,
+            },
+            ShootAction,
+        ))
+        .id();
+
+    let shoot_binding_trigger_value_oculus = commands
+        .spawn(XRUtilsBinding {
+            profile: "/interaction_profiles/oculus/touch_controller".into(),
+            binding: "/user/hand/right/input/trigger/value".into(),
+        })
+        .id();
+
+    let shoot_binding_trigger_value_meta = commands
+        .spawn(XRUtilsBinding {
+            profile: "/interaction_profiles/meta/touch_controller".into(),
+            binding: "/user/hand/right/input/trigger/value".into(),
+        })
+        .id();
+
+    commands
+        .entity(shoot_action)
+        .add_child(shoot_binding_trigger_value_oculus);
+    commands
+        .entity(shoot_action)
+        .add_child(shoot_binding_trigger_value_meta);
+
     // Sprint: use LEFT thumbstick click (very reliable Bool binding).
     //
     // You previously asked for the "upper trigger" (left grip). That path is runtime-dependent
@@ -208,6 +241,7 @@ pub fn create_action_entities(mut commands: Commands) {
     commands.entity(set).add_child(turn_action);
     commands.entity(set).add_child(jump_action);
     commands.entity(set).add_child(push_action);
+    commands.entity(set).add_child(shoot_action);
     commands.entity(set).add_child(sprint_action);
 }
 
@@ -241,6 +275,8 @@ pub(crate) struct ControllerActions {
     pub(crate) set: openxr::ActionSet,
     pub(crate) left_pose: openxr::Action<Posef>,
     pub(crate) right_pose: openxr::Action<Posef>,
+    pub(crate) left_aim_pose: openxr::Action<Posef>,
+    pub(crate) right_aim_pose: openxr::Action<Posef>,
 }
 
 #[derive(Resource, Clone)]
@@ -252,6 +288,21 @@ pub(crate) struct ControllerCubeAssets {
 
 #[derive(Component)]
 pub(crate) struct ControllerCube;
+
+#[derive(Component)]
+pub(crate) struct LeftController;
+
+#[derive(Component)]
+pub(crate) struct RightController;
+
+#[derive(Component)]
+pub(crate) struct ControllerAim;
+
+#[derive(Component)]
+pub(crate) struct LeftControllerAim;
+
+#[derive(Component)]
+pub(crate) struct RightControllerAim;
 
 /// Creates shared mesh/material assets for controller cubes.
 pub(crate) fn setup_controller_cubes(
@@ -311,11 +362,27 @@ pub(crate) fn create_controller_actions(world: &mut World) {
             return;
         }
     };
+    let left_aim_pose = match set.create_action("left_aim_pose", "Left Aim Pose", &[]) {
+        Ok(action) => action,
+        Err(err) => {
+            log::warn!("Unable to create left aim pose action: {}", err);
+            return;
+        }
+    };
+    let right_aim_pose = match set.create_action("right_aim_pose", "Right Aim Pose", &[]) {
+        Ok(action) => action,
+        Err(err) => {
+            log::warn!("Unable to create right aim pose action: {}", err);
+            return;
+        }
+    };
 
     world.insert_resource(ControllerActions {
         set,
         left_pose,
         right_pose,
+        left_aim_pose,
+        right_aim_pose,
     });
 }
 
@@ -340,6 +407,16 @@ pub(crate) fn suggest_controller_bindings(
             action: actions.right_pose.as_raw(),
             interaction_profile: profile.into(),
             bindings: vec!["/user/hand/right/input/grip/pose".into()],
+        });
+        bindings.write(OxrSuggestActionBinding {
+            action: actions.left_aim_pose.as_raw(),
+            interaction_profile: profile.into(),
+            bindings: vec!["/user/hand/left/input/aim/pose".into()],
+        });
+        bindings.write(OxrSuggestActionBinding {
+            action: actions.right_aim_pose.as_raw(),
+            interaction_profile: profile.into(),
+            bindings: vec!["/user/hand/right/input/aim/pose".into()],
         });
     }
 }
@@ -403,9 +480,32 @@ pub(crate) fn spawn_controller_cubes(
             return;
         }
     };
+    let left_aim_space = match session.create_action_space(
+        &actions.left_aim_pose,
+        openxr::Path::NULL,
+        Isometry3d::IDENTITY,
+    ) {
+        Ok(space) => space,
+        Err(err) => {
+            log::warn!("Unable to create left aim space: {}", err);
+            return;
+        }
+    };
+    let right_aim_space = match session.create_action_space(
+        &actions.right_aim_pose,
+        openxr::Path::NULL,
+        Isometry3d::IDENTITY,
+    ) {
+        Ok(space) => space,
+        Err(err) => {
+            log::warn!("Unable to create right aim space: {}", err);
+            return;
+        }
+    };
 
     commands.spawn((
         ControllerCube,
+        LeftController,
         left_space,
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.left_material.clone()),
@@ -414,10 +514,24 @@ pub(crate) fn spawn_controller_cubes(
 
     commands.spawn((
         ControllerCube,
+        RightController,
         right_space,
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.right_material.clone()),
         Name::new("RightControllerCube"),
+    ));
+
+    commands.spawn((
+        ControllerAim,
+        LeftControllerAim,
+        left_aim_space,
+        Name::new("LeftControllerAim"),
+    ));
+    commands.spawn((
+        ControllerAim,
+        RightControllerAim,
+        right_aim_space,
+        Name::new("RightControllerAim"),
     ));
 }
 
@@ -425,8 +539,12 @@ pub(crate) fn spawn_controller_cubes(
 pub(crate) fn cleanup_controller_cubes(
     mut commands: Commands,
     cubes: Query<Entity, With<ControllerCube>>,
+    aims: Query<Entity, With<ControllerAim>>,
 ) {
     for entity in &cubes {
+        commands.entity(entity).despawn();
+    }
+    for entity in &aims {
         commands.entity(entity).despawn();
     }
 }

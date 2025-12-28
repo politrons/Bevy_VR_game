@@ -85,6 +85,12 @@ pub struct JumpAction;
 #[derive(Component)]
 pub struct PushAction;
 
+/// Marker component attached to the XR action entity that provides the shoot (right trigger) input.
+///
+/// The system reads [`XRUtilsActionState::Bool`] and uses rising-edge detection to spawn a bullet.
+#[derive(Component)]
+pub struct ShootAction;
+
 
 
 

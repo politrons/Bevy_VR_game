@@ -43,6 +43,7 @@ mod player;
 mod ramp;
 mod scene;
 mod controller;
+mod shooting;
 // -------------------------
 // Imports used by the root module
 // -------------------------
@@ -53,6 +54,7 @@ use crate::player::{
 use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
 use crate::ramp::{move_ramps, setup_ramp_spawner, spawn_moving_ramps, RampRenderAssets, RampSpawnConfig, RampSpawnState};
+use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
 };
@@ -67,6 +69,7 @@ fn main() {
         .insert_resource(PlayerSettings::default())
         .insert_resource(PlayerKinematics::default())
         .insert_resource(PlayerProgress::default())
+        .insert_resource(BulletFireState::default())
         .add_plugins(add_xr_plugins(
             DefaultPlugins.set(AssetPlugin {
                 // Android / Quest tip: avoid `.meta` lookups that can fail depending on packaging.
@@ -79,6 +82,7 @@ fn main() {
         .add_systems(Startup, setup_scene)
         .add_systems(Startup, setup_gameplay)
         .add_systems(Startup, setup_ramp_spawner.after(setup_scene))
+        .add_systems(Startup, setup_bullet_assets)
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
         .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
         // Gameplay systems (guarded for Quest lifecycle quirks)
@@ -115,6 +119,13 @@ fn main() {
                 .run_if(resource_exists::<PlayerProgress>)
                 .run_if(resource_exists::<OxrViews>),
         )
+        .add_systems(
+            Update,
+            spawn_bullets
+                .run_if(openxr_session_running)
+                .run_if(resource_exists::<BulletAssets>),
+        )
+        .add_systems(Update, move_bullets.run_if(openxr_session_running))
         ;
     register_controller_cubes(&mut app);
     app.run();
