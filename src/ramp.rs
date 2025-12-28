@@ -222,6 +222,9 @@ pub struct RampSpawnConfig {
     ///
     /// We keep this conservative to avoid "sticky" feeling on steep slopes.
     pub allowed_incline_angles_deg: [f32; 2],
+
+    /// Maximum angle allowed for DOWN ramps (degrees).
+    pub max_down_angle_deg: f32,
 }
 
 impl Default for RampSpawnConfig {
@@ -245,6 +248,7 @@ impl Default for RampSpawnConfig {
             low_band_y_m: 3.0,
             high_band_y_m: 16.0,
             allowed_incline_angles_deg: [20.0, 30.0],
+            max_down_angle_deg: 20.0,
         }
     }
 }
@@ -917,6 +921,12 @@ fn choose_next_profile(
         RampSlopeDir::Up
     } else {
         RampSlopeDir::Down
+    };
+
+    let angle = if dir == RampSlopeDir::Down {
+        angle.min(config.max_down_angle_deg)
+    } else {
+        angle
     };
 
     RampProfile::Inclined { dir, angle_deg: angle }
