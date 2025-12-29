@@ -36,6 +36,8 @@ const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.46;
 const RAMP_SLIDE_VEL_EPS: f32 = 0.03;
 /// Require the player to be above the ramp surface to "land" on it (prevents side grabs).
 const RAMP_ABOVE_EPS: f32 = 0.12;
+/// Extra margin for wall hit detection.
+const WALL_HIT_EPS: f32 = 0.05;
 
 // -------------------------
 // Push tuning constants
@@ -483,6 +485,21 @@ pub fn handle_player(
         kin.ramp_velocity_z = 0.0;
         grounded = false;
     }
+
+    // Wall collision: touching a wall always resets.
+    if hits_wall(root.translation, &ramps) {
+        root.translation = spawn.pos;
+        root.rotation = spawn.rot;
+        kin.vertical_velocity = 0.0;
+        kin.prev_y = spawn.pos.y;
+        kin.ramp_velocity_z = 0.0;
+        kin.prev_jump_pressed = false;
+        kin.prev_push_pressed = false;
+        kin.push_time_left_s = 0.0;
+        kin.push_cooldown_s = 0.0;
+        progress.has_touched_ramp = false;
+        return;
+    }
 }
 
 /// Returns the best ground under the player (height, surface velocity, kind, slope).
@@ -498,6 +515,9 @@ fn ground_y_and_velocity(
     let mut best_slope_dy_dz = 0.0;
 
     for (t, r) in ramps.iter() {
+        if r.profile == RampProfile::Wall {
+            continue;
+        }
         let center = t.translation;
 
         // Ramps use simple footprints in X/Z (rect or circle), and may be inclined in Y along Z.
@@ -543,6 +563,30 @@ fn ground_y_and_velocity(
     }
 
     (best_y, best_vel, best_kind, best_slope_dy_dz)
+}
+
+/// Returns true if the player is intersecting a wall obstacle.
+fn hits_wall(
+    pos: Vec3,
+    ramps: &Query<(&Transform, &MovingRamp), Without<XrTrackingRoot>>,
+) -> bool {
+    for (t, r) in ramps.iter() {
+        if r.profile != RampProfile::Wall {
+            continue;
+        }
+        let center = t.translation;
+        let dx = (pos.x - center.x).abs();
+        let dz = (pos.z - center.z).abs();
+        if dx > r.half_extents.x + WALL_HIT_EPS || dz > r.half_extents.y + WALL_HIT_EPS {
+            continue;
+        }
+        let min_y = r.segment_y_start.min(r.segment_y_end);
+        let max_y = r.segment_y_start.max(r.segment_y_end);
+        if pos.y >= min_y - WALL_HIT_EPS && pos.y <= max_y + WALL_HIT_EPS {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extracts head yaw and a horizontal pivot point for turning-in-place.

@@ -9,6 +9,8 @@ pub enum GameplayMode {
     DownhillGameplay,
     /// Deterministic flow: jump pads climb to max, then incline ramps to min.
     JumpGameplay,
+    /// Random gameplay with occasional wall obstacles that must be shot.
+    ShooterGameplay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,10 +21,11 @@ pub enum DownhillPhase {
     DownRamps,
 }
 
-const DEFAULT_MODES: [GameplayMode; 3] = [
+const DEFAULT_MODES: [GameplayMode; 4] = [
     GameplayMode::RandomGameplay,
     GameplayMode::DownhillGameplay,
     GameplayMode::JumpGameplay,
+    GameplayMode::ShooterGameplay,
 ];
 const DEFAULT_SWITCH_INTERVAL_S: f32 = 120.0;
 const DEFAULT_SEED: u32 = 0xA5A5_1234;

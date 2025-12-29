@@ -18,6 +18,8 @@ pub enum RampProfile {
     Flat,
     /// A flat jump pad that auto-launches the player.
     Jump,
+    /// A vertical wall obstacle (not walkable).
+    Wall,
     /// An inclined ramp segment.
     Inclined { dir: RampSlopeDir, angle_deg: f32 },
 }
@@ -58,7 +60,7 @@ pub enum RampFootprint {
 /// Component attached to every moving ramp.
 ///
 /// Ramps only move forward (+Z). X is decided at spawn time and never changes.
-/// Y is represented by a *segment* (start/end) which can be flat, jump, or inclined.
+/// Y is represented by a *segment* (start/end) which can be flat, jump, wall, or inclined.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct MovingRamp {
     /// Half-extents in X/Z for simple footprint tests.
@@ -78,7 +80,7 @@ pub struct MovingRamp {
     /// Current velocity of the ramp (world-space). Updated every frame.
     pub current_vel: Vec3,
 
-    /// The ramp profile (flat, jump, or inclined).
+    /// The ramp profile (flat, jump, wall, or inclined).
     pub profile: RampProfile,
 
     /// Segment Z bounds in world space (used by player to evaluate surface height).
@@ -101,6 +103,9 @@ impl MovingRamp {
     ///
     /// If `world_z` is outside the segment bounds, this returns `None`.
     pub fn surface_top_y_at(&self, world_z: f32) -> Option<f32> {
+        if self.profile == RampProfile::Wall {
+            return None;
+        }
         if world_z < self.segment_z_start || world_z > self.segment_z_end {
             return None;
         }
@@ -137,6 +142,7 @@ impl MovingRamp {
                 let rise = (self.segment_y_start - self.segment_y_end).abs();
                 low + rise * t
             }
+            RampProfile::Wall => return None,
         };
 
         Some(top_y)
@@ -146,6 +152,9 @@ impl MovingRamp {
     ///
     /// Positive means the surface goes up as Z increases.
     pub fn surface_slope_dy_dz(&self) -> f32 {
+        if self.profile == RampProfile::Wall {
+            return 0.0;
+        }
         let len = self.segment_z_end - self.segment_z_start;
         if len.abs() <= f32::EPSILON {
             return 0.0;
@@ -211,6 +220,10 @@ pub struct RampSpawnConfig {
     pub flat_probability_mid_band: f32,
     /// Chance for a flat segment to become a jump pad (RandomGameplay only).
     pub jump_probability: f32,
+    /// Chance to spawn a wall after a lane (ShooterGameplay only).
+    pub wall_spawn_probability: f32,
+    /// Gap in meters between a spawned ramp and its wall.
+    pub wall_gap_m: f32,
 
     /// Y band (relative to floor top): below this we allow long UP streaks.
     pub low_band_y_m: f32,
@@ -245,6 +258,8 @@ impl Default for RampSpawnConfig {
             max_vertical_step_cross_lane_m: 0.9,
             flat_probability_mid_band: 0.50,
             jump_probability: 0.15,
+            wall_spawn_probability: 0.30,
+            wall_gap_m: 0.2,
             low_band_y_m: 3.0,
             high_band_y_m: 16.0,
             allowed_incline_angles_deg: [20.0, 30.0],
@@ -428,6 +443,9 @@ pub(crate) fn spawn_moving_ramps(
                     GameplayMode::RandomGameplay => {
                         choose_next_lane_segment(&config, &mut state, lane)
                     }
+                    GameplayMode::ShooterGameplay => {
+                        choose_next_lane_segment(&config, &mut state, lane)
+                    }
                     GameplayMode::DownhillGameplay => choose_next_lane_segment_downhill(
                         &config,
                         &state,
@@ -497,6 +515,21 @@ pub(crate) fn spawn_moving_ramps(
                     z_end,
                     profile,
                 );
+                if mode == GameplayMode::ShooterGameplay {
+                    maybe_spawn_wall(
+                        &mut commands,
+                        &assets,
+                        &config,
+                        &mut state,
+                        floor_top_y,
+                        x,
+                        z,
+                        z_start,
+                        z_end,
+                        profile,
+                        end_y_rel,
+                    );
+                }
 
                 update_lane_history(&mut state, lane, profile);
                 // Update continuity state to the actual end.
@@ -547,6 +580,7 @@ pub(crate) fn spawn_moving_ramps(
 
         let (profile, start_y_rel, end_y_rel) = match mode {
             GameplayMode::RandomGameplay => choose_next_lane_segment(&config, &mut state, lane),
+            GameplayMode::ShooterGameplay => choose_next_lane_segment(&config, &mut state, lane),
             GameplayMode::DownhillGameplay => choose_next_lane_segment_downhill(
                 &config,
                 &state,
@@ -609,6 +643,21 @@ pub(crate) fn spawn_moving_ramps(
             z_end,
             profile,
         );
+        if mode == GameplayMode::ShooterGameplay {
+            maybe_spawn_wall(
+                &mut commands,
+                &assets,
+                &config,
+                &mut state,
+                floor_top_y,
+                x,
+                z,
+                z_start,
+                z_end,
+                profile,
+                end_y_rel,
+            );
+        }
 
         update_lane_history(&mut state, lane, profile);
         state.lane_next_y[lane] = if is_downhill_like(mode) {
@@ -684,6 +733,12 @@ fn choose_next_lane_segment(
 
     match profile {
         RampProfile::Flat | RampProfile::Jump => {
+            start_y_rel = next_anchor_y_rel;
+            end_y_rel = next_anchor_y_rel;
+        }
+        RampProfile::Wall => {
+            // Wall segments are not part of lane continuity. Fall back to flat behavior.
+            profile = RampProfile::Flat;
             start_y_rel = next_anchor_y_rel;
             end_y_rel = next_anchor_y_rel;
         }
@@ -768,7 +823,7 @@ fn update_lane_history(state: &mut RampSpawnState, lane: usize, profile: RampPro
         state.lane_down_streak[lane] = state.lane_down_streak[lane].saturating_add(1);
         state.lane_up_streak[lane] = 0;
     } else {
-        // Flat or jump pads break both streaks.
+        // Flat, jump pads, or walls break both streaks.
         state.lane_up_streak[lane] = 0;
         state.lane_down_streak[lane] = 0;
     }
@@ -973,20 +1028,6 @@ fn spawn_one_ramp(
     profile: RampProfile,
 ) {
     let thickness = config.ramp_dimensions_m.y;
-    let (half_x, base_half_z) = match profile {
-        RampProfile::Jump => {
-            let radius = config
-                .ramp_dimensions_m
-                .x
-                .min(config.ramp_dimensions_m.z)
-                * 0.5;
-            (radius, radius)
-        }
-        _ => (
-            config.ramp_dimensions_m.x * 0.5,
-            config.ramp_dimensions_m.z * 0.5,
-        ),
-    };
 
     // Flat uses the base length; inclined is stretched along Z.
     let z_multiplier = match profile {
@@ -1000,11 +1041,24 @@ fn spawn_one_ramp(
             dir: RampSlopeDir::Down,
             ..
         } => config.inclined_length_multiplier * 0.70,
-        RampProfile::Flat | RampProfile::Jump => 1.0,
+        RampProfile::Flat | RampProfile::Jump | RampProfile::Wall => 1.0,
     };
 
-    let half_z = base_half_z * z_multiplier;
-    let half_extents = Vec2::new(half_x, half_z);
+    let half_extents = match profile {
+        RampProfile::Jump => {
+            let radius = config
+                .ramp_dimensions_m
+                .x
+                .min(config.ramp_dimensions_m.z)
+                * 0.5;
+            Vec2::splat(radius)
+        }
+        RampProfile::Wall => Vec2::new(config.ramp_dimensions_m.x * 0.5, thickness * 0.5),
+        _ => Vec2::new(
+            config.ramp_dimensions_m.x * 0.5,
+            (config.ramp_dimensions_m.z * 0.5) * z_multiplier,
+        ),
+    };
 
     // `segment_y_start/end` store the world-space **top surface** heights at the segment ends.
     // Because the ramp mesh is a rotated cuboid, its translation.y is NOT the top surface.
@@ -1013,6 +1067,10 @@ fn spawn_one_ramp(
         RampProfile::Flat | RampProfile::Jump => {
             // Flat: top surface is simply center + thickness/2
             (y_start + y_end) * 0.5 - thickness * 0.5
+        }
+        RampProfile::Wall => {
+            // Wall: center between base and top.
+            (y_start + y_end) * 0.5
         }
         RampProfile::Inclined { dir, angle_deg } => {
             let sign = match dir {
@@ -1031,6 +1089,9 @@ fn spawn_one_ramp(
     match profile {
         RampProfile::Flat | RampProfile::Jump => {
             // No rotation.
+        }
+        RampProfile::Wall => {
+            transform.rotation = Quat::from_rotation_x(-90.0_f32.to_radians());
         }
         RampProfile::Inclined { dir, angle_deg } => {
             // If your world uses +Z forward, then an "Up" ramp should raise as Z increases.
@@ -1070,7 +1131,7 @@ fn spawn_one_ramp(
             thickness,
             z_speed_mps: config.ramp_speed_z_mps,
             z_min: z_start,
-            z_max: z_end + half_z + 0.5,
+            z_max: z_end + half_extents.y + 0.5,
             current_vel: Vec3::new(0.0, 0.0, config.ramp_speed_z_mps),
             profile,
             segment_z_start,
@@ -1147,6 +1208,7 @@ fn enforce_profile_monotonic(profile: RampProfile, start_y_rel: f32, end_y_rel: 
         }
         RampProfile::Flat => (RampProfile::Flat, end_y_rel),
         RampProfile::Jump => (RampProfile::Jump, end_y_rel),
+        RampProfile::Wall => (RampProfile::Wall, end_y_rel),
     }
 }
 
@@ -1172,6 +1234,67 @@ fn lane_safe_x_jitter_m(config: &RampSpawnConfig) -> f32 {
     let max_jitter = (config.lane_spacing_m - config.ramp_dimensions_m.x) * 0.5;
     let max_jitter = (max_jitter - margin).max(0.0);
     config.lane_x_jitter_m.min(max_jitter)
+}
+
+/// Returns the half Z-extent for a ramp profile (used for spacing).
+fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f32 {
+    match profile {
+        RampProfile::Inclined { .. } => {
+            (config.ramp_dimensions_m.z * 0.5) * config.inclined_length_multiplier * 0.70
+        }
+        RampProfile::Jump => config
+            .ramp_dimensions_m
+            .x
+            .min(config.ramp_dimensions_m.z)
+            * 0.5,
+        RampProfile::Flat => config.ramp_dimensions_m.z * 0.5,
+        RampProfile::Wall => config.ramp_dimensions_m.y * 0.5,
+    }
+}
+
+/// Spawns a vertical wall obstacle just ahead of the current lane ramp.
+fn maybe_spawn_wall(
+    commands: &mut Commands,
+    assets: &RampRenderAssets,
+    config: &RampSpawnConfig,
+    state: &mut RampSpawnState,
+    floor_top_y: f32,
+    x: f32,
+    z: f32,
+    z_start: f32,
+    z_end: f32,
+    profile: RampProfile,
+    end_y_rel: f32,
+) {
+    if rng_f32_01(&mut state.seed) >= config.wall_spawn_probability {
+        return;
+    }
+
+    let ramp_half_z = ramp_half_z_for_profile(config, profile);
+    let wall_half_z = config.ramp_dimensions_m.y * 0.5;
+    let wall_z = z + ramp_half_z + wall_half_z + config.wall_gap_m;
+
+    let wall_z_min = z_start + wall_half_z;
+    let wall_z_max = z_end - wall_half_z;
+    if wall_z < wall_z_min || wall_z > wall_z_max {
+        return;
+    }
+
+    let wall_base_y = floor_top_y + end_y_rel;
+    let wall_top_y = wall_base_y + config.ramp_dimensions_m.z;
+
+    spawn_one_ramp(
+        commands,
+        assets,
+        config,
+        x,
+        wall_base_y,
+        wall_top_y,
+        wall_z,
+        z_start,
+        z_end,
+        RampProfile::Wall,
+    );
 }
 
 /// Deterministic LCG used for ramp spawning randomness.
