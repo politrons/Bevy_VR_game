@@ -75,6 +75,21 @@ pub(crate) fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     _images: ResMut<Assets<Image>>,
 ) {
+    commands.insert_resource(AmbientLight {
+        color: Color::srgb(0.45, 0.45, 0.45),
+        brightness: 0.12,
+        affects_lightmapped_meshes: false,
+    });
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 4500.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 80.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Name::new("SunLight"),
+    ));
+
     // Road/floor parameters
     // Half the previous size (width and length)
     let floor_len = 50.0_f32;
