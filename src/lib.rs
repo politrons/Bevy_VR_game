@@ -60,7 +60,8 @@ use crate::ramp::{
 };
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
-    setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
+    setup_scene, snap_player_to_floor_once, spawn_planet_floor, spin_planet_floor, FloorParams,
+    FloorTopY, PlanetFloorAssets, PlanetFloorState, PlayerSpawn,
 };
 
 #[bevy_main]
@@ -105,6 +106,14 @@ fn main() {
                 .run_if(resource_exists::<SlideRampModel>)
                 .run_if(resource_exists::<RampRenderAssets>),
         )
+        .add_systems(
+            Update,
+            spawn_planet_floor
+                .run_if(resource_exists::<PlanetFloorAssets>)
+                .run_if(resource_exists::<PlanetFloorState>)
+                .run_if(resource_exists::<FloorParams>),
+        )
+        .add_systems(Update, spin_planet_floor)
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
         .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
         // Gameplay systems (guarded for Quest lifecycle quirks)
@@ -122,6 +131,7 @@ fn main() {
                 .run_if(resource_exists::<RampRenderAssets>)
                 .run_if(resource_exists::<RampSpawnConfig>)
                 .run_if(resource_exists::<RampSpawnState>)
+                .run_if(resource_exists::<FloorTopY>)
                 .run_if(resource_exists::<PlayerSpawn>),
         )
         .add_systems(

@@ -281,7 +281,7 @@ impl Default for RampSpawnConfig {
             z_spacing_m: 5.0,
             z_spawn_jitter_m: 3.0,
             initial_ramps_per_lane: 6,
-            min_height_above_floor_m: 1.0,
+            min_height_above_floor_m: 25.0,
             max_height_above_floor_m: 40.0,
             lane_x_jitter_m: 0.8,
             ramp_speed_z_mps: 5.0,
@@ -587,7 +587,7 @@ pub(crate) fn spawn_moving_ramps(
     mut commands: Commands,
     time: Res<Time>,
     floor: Res<FloorParams>,
-    floor_top_y: Option<Res<FloorTopY>>,
+    floor_top_y: Res<FloorTopY>,
     config: Res<RampSpawnConfig>,
     mut state: ResMut<RampSpawnState>,
     assets: Res<RampRenderAssets>,
@@ -602,7 +602,7 @@ pub(crate) fn spawn_moving_ramps(
         .map(|g| g.current)
         .unwrap_or(GameplayMode::RandomGameplay);
 
-    let floor_top_y = floor_top_y.map(|r| r.0).unwrap_or(0.0);
+    let floor_top_y = floor_top_y.0;
 
     // Floor bounds.
     let x_min = floor.center.x - floor.half_extents.x;

@@ -1,5 +1,11 @@
+use bevy::gltf::{Gltf, GltfLoaderSettings, GltfMesh};
 use bevy::prelude::*;
 use bevy_mod_xr::session::XrTrackingRoot;
+
+const PLANET_MODEL_RADIUS_M: f32 = 1.0;
+const PLANET_VISUAL_RADIUS_M: f32 = 41.666668;
+const PLANET_ROTATION_SPEED_RAD_PER_SEC: f32 = 0.012;
+const PLANET_ROTATION_AXIS: Vec3 = Vec3::Y;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct PlayerSpawn {
@@ -62,6 +68,31 @@ pub(crate) struct FloorTopY(pub(crate) f32);
 #[derive(Resource, Debug, Default)]
 pub(crate) struct DidSnapToFloor(pub(crate) bool);
 
+/// Tag for entities that render the main floor and its boundary walls.
+#[derive(Component)]
+pub(crate) struct FloorVisual;
+
+/// Handles for the planet visual that replaces the default floor graphics.
+#[derive(Resource, Clone)]
+pub(crate) struct PlanetFloorAssets {
+    pub(crate) gltf: Handle<Gltf>,
+    pub(crate) fallback_material: Handle<StandardMaterial>,
+}
+
+/// Tracks whether the planet visual has been spawned.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct PlanetFloorState {
+    pub(crate) spawned: bool,
+    pub(crate) failed: bool,
+}
+
+/// Rotating planet surface that visually replaces the floor.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct PlanetFloor {
+    pub(crate) axis: Vec3,
+    pub(crate) speed_rad_per_sec: f32,
+}
+
 /// Creates the initial scene: a large road (playable floor), side/end walls, a textured
 /// debug cube (to validate Android asset loading), and a moving platform the player can ride.
 ///
@@ -71,6 +102,7 @@ pub(crate) struct DidSnapToFloor(pub(crate) bool);
 /// - [`TextureProbe`] for logging asset load state on device
 pub(crate) fn setup_scene(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     _images: ResMut<Assets<Image>>,
@@ -122,9 +154,11 @@ pub(crate) fn setup_scene(
     });
 
     commands.spawn((
+        FloorVisual,
         Mesh3d(meshes.add(Cuboid::new(floor_with, floor_thickness, floor_len))),
         MeshMaterial3d(floor_top_mat),
         Transform::from_xyz(0.0, floor_center_y, 0.0),
+        Name::new("FloorTop"),
     ));
 
     // Side walls
@@ -139,26 +173,34 @@ pub(crate) fn setup_scene(
 
     // Left/right walls
     commands.spawn((
+        FloorVisual,
         Mesh3d(meshes.add(Cuboid::new(wall_thickness, wall_h, floor_len))),
         MeshMaterial3d(floor_side_mat.clone()),
         Transform::from_xyz(-wall_x, wall_center_y, 0.0),
+        Name::new("WallLeft"),
     ));
     commands.spawn((
+        FloorVisual,
         Mesh3d(meshes.add(Cuboid::new(wall_thickness, wall_h, floor_len))),
         MeshMaterial3d(floor_side_mat.clone()),
         Transform::from_xyz(wall_x, wall_center_y, 0.0),
+        Name::new("WallRight"),
     ));
 
     // End walls
     commands.spawn((
+        FloorVisual,
         Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, wall_thickness))),
         MeshMaterial3d(floor_side_mat.clone()),
         Transform::from_xyz(0.0, wall_center_y, -wall_z),
+        Name::new("WallBack"),
     ));
     commands.spawn((
+        FloorVisual,
         Mesh3d(meshes.add(Cuboid::new(floor_with, wall_h, wall_thickness))),
         MeshMaterial3d(floor_side_mat.clone()),
         Transform::from_xyz(0.0, wall_center_y, wall_z),
+        Name::new("WallFront"),
     ));
 
     // Ground logic: on-road clamps to top, off-road falls down
@@ -170,6 +212,138 @@ pub(crate) fn setup_scene(
     });
     commands.insert_resource(FloorTopY(floor_top_y));
     commands.insert_resource(DidSnapToFloor(false));
+
+    let planet_fallback_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.20, 0.20, 0.20),
+        ..default()
+    });
+    let planet_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/planet.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
+    commands.insert_resource(PlanetFloorAssets {
+        gltf: planet_gltf,
+        fallback_material: planet_fallback_material,
+    });
+    commands.insert_resource(PlanetFloorState::default());
+}
+
+/// Spawns the planet visual once the GLB has loaded, then hides the default floor meshes.
+pub(crate) fn spawn_planet_floor(
+    assets: Option<Res<PlanetFloorAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    floor: Option<Res<FloorParams>>,
+    mut state: Option<ResMut<PlanetFloorState>>,
+    floor_visuals: Query<Entity, With<FloorVisual>>,
+    mut commands: Commands,
+) {
+    let (Some(assets), Some(floor), Some(mut state)) = (assets, floor, state) else {
+        return;
+    };
+    if state.spawned || state.failed {
+        return;
+    }
+
+    let Some(load_state) = asset_server.get_load_state(assets.gltf.id()) else {
+        return;
+    };
+    match load_state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Planet model has no meshes.");
+                state.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.fallback_material.clone());
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Planet model has no mesh primitives.");
+                state.failed = true;
+                return;
+            }
+
+            let scale = PLANET_VISUAL_RADIUS_M / PLANET_MODEL_RADIUS_M;
+            let planet = commands
+                .spawn((
+                    PlanetFloor {
+                        axis: PLANET_ROTATION_AXIS,
+                        speed_rad_per_sec: PLANET_ROTATION_SPEED_RAD_PER_SEC,
+                    },
+                    Transform {
+                        translation: Vec3::new(
+                            floor.center.x,
+                            floor.top_y - PLANET_VISUAL_RADIUS_M,
+                            floor.center.z,
+                        ),
+                        scale: Vec3::splat(scale),
+                        ..default()
+                    },
+                    Name::new("PlanetFloor"),
+                ))
+                .id();
+            commands.entity(planet).with_children(|parent| {
+                for (mesh, material) in &primitives {
+                    parent.spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::default(),
+                    ));
+                }
+            });
+
+            for entity in &floor_visuals {
+                commands.entity(entity).insert(Visibility::Hidden);
+            }
+            state.spawned = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Planet model failed to load: {:?}", err);
+            state.failed = true;
+        }
+        _ => {}
+    }
+}
+
+/// Rotates the planet visual slowly to give a subtle sense of motion.
+pub(crate) fn spin_planet_floor(
+    time: Res<Time>,
+    mut planets: Query<(&mut Transform, &PlanetFloor)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (mut transform, planet) in &mut planets {
+        let axis = if planet.axis.length_squared() > 0.0 {
+            planet.axis.normalize()
+        } else {
+            Vec3::Y
+        };
+        transform.rotate(Quat::from_axis_angle(
+            axis,
+            planet.speed_rad_per_sec * dt,
+        ));
+    }
 }
 
 /// Snaps the XR tracking root's transform to the configured PlayerSpawn exactly once.
