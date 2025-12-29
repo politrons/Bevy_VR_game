@@ -54,9 +54,9 @@ use crate::player::{
 use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
 use crate::ramp::{
-    move_ramps, prepare_flat_ramp_model, prepare_jump_ramp_model, setup_ramp_spawner,
-    spawn_moving_ramps, FlatRampModel, JumpRampModel, RampRenderAssets, RampSpawnConfig,
-    RampSpawnState,
+    move_ramps, prepare_flat_ramp_model, prepare_jump_ramp_model, prepare_slide_ramp_model,
+    setup_ramp_spawner, spawn_moving_ramps, FlatRampModel, JumpRampModel, SlideRampModel,
+    RampRenderAssets, RampSpawnConfig, RampSpawnState,
 };
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
@@ -97,6 +97,12 @@ fn main() {
             Update,
             prepare_jump_ramp_model
                 .run_if(resource_exists::<JumpRampModel>)
+                .run_if(resource_exists::<RampRenderAssets>),
+        )
+        .add_systems(
+            Update,
+            prepare_slide_ramp_model
+                .run_if(resource_exists::<SlideRampModel>)
                 .run_if(resource_exists::<RampRenderAssets>),
         )
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))

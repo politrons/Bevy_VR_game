@@ -19,9 +19,11 @@ use openxr::Posef;
 
 use crate::player::{JumpAction, MoveAction, PushAction, ShootAction, SprintAction, TurnAction};
 
-const RIGHT_CONTROLLER_MODEL_SCALE: f32 = 0.36;
+const RIGHT_CONTROLLER_MODEL_SCALE: f32 = 0.12;
 const RIGHT_CONTROLLER_MODEL_PITCH_RAD: f32 = -std::f32::consts::FRAC_PI_2;
-const RIGHT_CONTROLLER_MODEL_YAW_RAD: f32 = 0.0;
+const RIGHT_CONTROLLER_MODEL_YAW_RAD: f32 =
+    std::f32::consts::PI + std::f32::consts::PI / 9.0 - std::f32::consts::PI / 6.0
+        - std::f32::consts::FRAC_PI_4 + std::f32::consts::PI;
 const RIGHT_CONTROLLER_MODEL_ROLL_RAD: f32 = 0.0;
 
 #[derive(Resource, Default)]

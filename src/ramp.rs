@@ -28,6 +28,8 @@ pub enum RampProfile {
 const FLAT_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
+const SLIDE_RAMP_MODEL_SCALE: f32 = 2.0;
+const SLIDE_RAMP_MODEL_YAW_RAD: f32 = std::f32::consts::FRAC_PI_2;
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -177,6 +179,7 @@ pub struct RampRenderAssets {
     pub material: Handle<StandardMaterial>,
     pub flat_gltf: Handle<Gltf>,
     pub jump_gltf: Handle<Gltf>,
+    pub slide_gltf: Handle<Gltf>,
 }
 
 #[derive(Resource, Default)]
@@ -188,6 +191,13 @@ pub struct FlatRampModel {
 
 #[derive(Resource, Default)]
 pub struct JumpRampModel {
+    pub ready: bool,
+    pub failed: bool,
+    pub primitives: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+}
+
+#[derive(Resource, Default)]
+pub struct SlideRampModel {
     pub ready: bool,
     pub failed: bool,
     pub primitives: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
@@ -371,6 +381,14 @@ pub(crate) fn setup_ramp_spawner(
             settings.load_animations = false;
         },
     );
+    let slide_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/slide.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
 
     commands.insert_resource(RampRenderAssets {
         mesh: ramp_mesh,
@@ -378,9 +396,11 @@ pub(crate) fn setup_ramp_spawner(
         material: ramp_material,
         flat_gltf,
         jump_gltf,
+        slide_gltf,
     });
     commands.insert_resource(FlatRampModel::default());
     commands.insert_resource(JumpRampModel::default());
+    commands.insert_resource(SlideRampModel::default());
     commands.insert_resource(config);
     commands.insert_resource(RampSpawnState::default());
 }
@@ -499,6 +519,63 @@ pub(crate) fn prepare_jump_ramp_model(
     }
 }
 
+/// Caches the slide ramp GLB mesh primitives once the asset is loaded.
+pub(crate) fn prepare_slide_ramp_model(
+    assets: Option<Res<RampRenderAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    mut model: Option<ResMut<SlideRampModel>>,
+) {
+    let (Some(assets), Some(mut model)) = (assets, model) else {
+        return;
+    };
+    if model.ready || model.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.slide_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.slide_gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Slide ramp model has no meshes.");
+                model.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.material.clone());
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Slide ramp model has no mesh primitives.");
+                model.failed = true;
+                return;
+            }
+            model.primitives = primitives;
+            model.ready = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Slide ramp model failed to load: {:?}", err);
+            model.failed = true;
+        }
+        _ => {}
+    }
+}
+
 /// Spawn ramps continuously.
 ///
 /// Ramps always spawn fully on the floor (their footprint must fit inside the floor).
@@ -516,6 +593,7 @@ pub(crate) fn spawn_moving_ramps(
     assets: Res<RampRenderAssets>,
     flat_model: Option<Res<FlatRampModel>>,
     jump_model: Option<Res<JumpRampModel>>,
+    slide_model: Option<Res<SlideRampModel>>,
     gameplay: Option<ResMut<GameplayState>>,
 ) {
     let mut gameplay = gameplay;
@@ -666,6 +744,7 @@ pub(crate) fn spawn_moving_ramps(
                     &assets,
                     flat_model.as_deref(),
                     jump_model.as_deref(),
+                    slide_model.as_deref(),
                     &config,
                     x,
                     floor_top_y + start_y_rel,
@@ -681,6 +760,7 @@ pub(crate) fn spawn_moving_ramps(
                         &assets,
                         flat_model.as_deref(),
                         jump_model.as_deref(),
+                        slide_model.as_deref(),
                         &config,
                         &mut state,
                         floor_top_y,
@@ -798,6 +878,7 @@ pub(crate) fn spawn_moving_ramps(
             &assets,
             flat_model.as_deref(),
             jump_model.as_deref(),
+            slide_model.as_deref(),
             &config,
             x,
             floor_top_y + start_y_rel,
@@ -813,6 +894,7 @@ pub(crate) fn spawn_moving_ramps(
                 &assets,
                 flat_model.as_deref(),
                 jump_model.as_deref(),
+                slide_model.as_deref(),
                 &config,
                 &mut state,
                 floor_top_y,
@@ -1186,6 +1268,7 @@ fn spawn_one_ramp(
     assets: &RampRenderAssets,
     flat_model: Option<&FlatRampModel>,
     jump_model: Option<&JumpRampModel>,
+    slide_model: Option<&SlideRampModel>,
     config: &RampSpawnConfig,
     x: f32,
     y_start: f32,
@@ -1354,10 +1437,36 @@ fn spawn_one_ramp(
                 ));
             }
         }
-        _ => {
-            let mesh = assets.mesh.clone();
+        RampProfile::Inclined { .. } => {
+            let mut used_model = false;
+            if let Some(model) = slide_model {
+                if model.ready {
+                    entity.with_children(|parent| {
+                        for (mesh, material) in &model.primitives {
+                            parent.spawn((
+                                Mesh3d(mesh.clone()),
+                                MeshMaterial3d(material.clone()),
+                                Transform {
+                                    rotation: Quat::from_rotation_y(SLIDE_RAMP_MODEL_YAW_RAD),
+                                    scale: Vec3::splat(SLIDE_RAMP_MODEL_SCALE),
+                                    ..default()
+                                },
+                            ));
+                        }
+                    });
+                    used_model = true;
+                }
+            }
+            if !used_model {
+                entity.insert((
+                    Mesh3d(assets.mesh.clone()),
+                    MeshMaterial3d(assets.material.clone()),
+                ));
+            }
+        }
+        RampProfile::Wall => {
             entity.insert((
-                Mesh3d(mesh),
+                Mesh3d(assets.mesh.clone()),
                 MeshMaterial3d(assets.material.clone()),
             ));
         }
@@ -1480,6 +1589,7 @@ fn maybe_spawn_wall(
     assets: &RampRenderAssets,
     flat_model: Option<&FlatRampModel>,
     jump_model: Option<&JumpRampModel>,
+    slide_model: Option<&SlideRampModel>,
     config: &RampSpawnConfig,
     state: &mut RampSpawnState,
     floor_top_y: f32,
@@ -1512,6 +1622,7 @@ fn maybe_spawn_wall(
         assets,
         flat_model,
         jump_model,
+        slide_model,
         config,
         x,
         wall_base_y,
