@@ -25,11 +25,11 @@ pub struct Bullet {
     pub remaining_m: f32,
 }
 
-const BULLET_RADIUS_M: f32 = 0.05;
+const BULLET_RADIUS_M: f32 = 0.035;
 const BULLET_SPEED_MPS: f32 = 18.0;
 const BULLET_MAX_DISTANCE_M: f32 = 40.0;
 const BULLET_SPAWN_OFFSET_M: f32 = 0.12;
-const BULLET_PITCH_DOWN_DEG: f32 = 6.0;
+const BULLET_PITCH_DOWN_DEG: f32 = 12.0;
 const TRIGGER_FIRE_THRESHOLD: f32 = 0.6;
 
 /// Creates the shared bullet mesh/material.
@@ -40,8 +40,8 @@ pub(crate) fn setup_bullet_assets(
 ) {
     let mesh = meshes.add(Sphere::new(BULLET_RADIUS_M));
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.98, 0.92, 0.20),
-        emissive: Color::srgb(0.40, 0.35, 0.06).into(),
+        base_color: Color::srgb(0.95, 0.10, 0.10),
+        emissive: Color::srgb(0.35, 0.05, 0.05).into(),
         unlit: true,
         ..default()
     });

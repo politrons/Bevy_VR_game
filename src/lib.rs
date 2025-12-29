@@ -53,7 +53,10 @@ use crate::player::{
 };
 use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
-use crate::ramp::{move_ramps, setup_ramp_spawner, spawn_moving_ramps, RampRenderAssets, RampSpawnConfig, RampSpawnState};
+use crate::ramp::{
+    move_ramps, prepare_flat_ramp_model, setup_ramp_spawner, spawn_moving_ramps, FlatRampModel,
+    RampRenderAssets, RampSpawnConfig, RampSpawnState,
+};
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, FloorParams, FloorTopY, PlayerSpawn,
@@ -83,6 +86,12 @@ fn main() {
         .add_systems(Startup, setup_gameplay)
         .add_systems(Startup, setup_ramp_spawner.after(setup_scene))
         .add_systems(Startup, setup_bullet_assets)
+        .add_systems(
+            Update,
+            prepare_flat_ramp_model
+                .run_if(resource_exists::<FlatRampModel>)
+                .run_if(resource_exists::<RampRenderAssets>),
+        )
         .add_systems(XrSessionCreated, tune_xr_cameras.after(XrViewInit))
         .add_systems(Startup, create_action_entities.before(XRUtilsActionSystems::CreateEvents))
         // Gameplay systems (guarded for Quest lifecycle quirks)

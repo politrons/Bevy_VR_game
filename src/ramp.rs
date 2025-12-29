@@ -1,5 +1,6 @@
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
+use bevy::gltf::{Gltf, GltfLoaderSettings, GltfMesh};
 
 use crate::gameplay::{DownhillPhase, GameplayMode, GameplayState};
 use crate::scene::{FloorParams, FloorTopY};
@@ -23,6 +24,8 @@ pub enum RampProfile {
     /// An inclined ramp segment.
     Inclined { dir: RampSlopeDir, angle_deg: f32 },
 }
+
+const FLAT_RAMP_MODEL_SCALE: f32 = 1.0;
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -170,6 +173,14 @@ pub struct RampRenderAssets {
     pub mesh: Handle<Mesh>,
     pub jump_mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
+    pub flat_gltf: Handle<Gltf>,
+}
+
+#[derive(Resource, Default)]
+pub struct FlatRampModel {
+    pub ready: bool,
+    pub failed: bool,
+    pub primitives: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
 }
 
 /// Configuration for ramp spawning.
@@ -309,6 +320,7 @@ impl Default for RampSpawnState {
 /// The mesh is a simple cuboid. For inclined ramps we rotate the transform.
 pub(crate) fn setup_ramp_spawner(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -333,14 +345,81 @@ pub(crate) fn setup_ramp_spawner(
         metallic: 0.0,
         ..default()
     });
+    let flat_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/floating.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
 
     commands.insert_resource(RampRenderAssets {
         mesh: ramp_mesh,
         jump_mesh,
         material: ramp_material,
+        flat_gltf,
     });
+    commands.insert_resource(FlatRampModel::default());
     commands.insert_resource(config);
     commands.insert_resource(RampSpawnState::default());
+}
+
+/// Caches the flat ramp GLB mesh primitives once the asset is loaded.
+pub(crate) fn prepare_flat_ramp_model(
+    assets: Option<Res<RampRenderAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    mut model: Option<ResMut<FlatRampModel>>,
+) {
+    let (Some(assets), Some(mut model)) = (assets, model) else {
+        return;
+    };
+    if model.ready || model.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.flat_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.flat_gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Flat ramp model has no meshes.");
+                model.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.material.clone());
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Flat ramp model has no mesh primitives.");
+                model.failed = true;
+                return;
+            }
+            model.primitives = primitives;
+            model.ready = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Flat ramp model failed to load: {:?}", err);
+            model.failed = true;
+        }
+        _ => {}
+    }
 }
 
 /// Spawn ramps continuously.
@@ -358,6 +437,7 @@ pub(crate) fn spawn_moving_ramps(
     config: Res<RampSpawnConfig>,
     mut state: ResMut<RampSpawnState>,
     assets: Res<RampRenderAssets>,
+    flat_model: Option<Res<FlatRampModel>>,
     gameplay: Option<ResMut<GameplayState>>,
 ) {
     let mut gameplay = gameplay;
@@ -506,6 +586,7 @@ pub(crate) fn spawn_moving_ramps(
                 spawn_one_ramp(
                     &mut commands,
                     &assets,
+                    flat_model.as_deref(),
                     &config,
                     x,
                     floor_top_y + start_y_rel,
@@ -519,6 +600,7 @@ pub(crate) fn spawn_moving_ramps(
                     maybe_spawn_wall(
                         &mut commands,
                         &assets,
+                        flat_model.as_deref(),
                         &config,
                         &mut state,
                         floor_top_y,
@@ -634,6 +716,7 @@ pub(crate) fn spawn_moving_ramps(
         spawn_one_ramp(
             &mut commands,
             &assets,
+            flat_model.as_deref(),
             &config,
             x,
             floor_top_y + start_y_rel,
@@ -647,6 +730,7 @@ pub(crate) fn spawn_moving_ramps(
             maybe_spawn_wall(
                 &mut commands,
                 &assets,
+                flat_model.as_deref(),
                 &config,
                 &mut state,
                 floor_top_y,
@@ -1018,6 +1102,7 @@ fn choose_next_profile(
 fn spawn_one_ramp(
     commands: &mut Commands,
     assets: &RampRenderAssets,
+    flat_model: Option<&FlatRampModel>,
     config: &RampSpawnConfig,
     x: f32,
     y_start: f32,
@@ -1112,18 +1197,12 @@ fn spawn_one_ramp(
     let segment_z_start = z - half_extents.y;
     let segment_z_end = z + half_extents.y;
 
-    let mesh = match profile {
-        RampProfile::Jump => assets.jump_mesh.clone(),
-        _ => assets.mesh.clone(),
-    };
     let footprint = match profile {
         RampProfile::Jump => RampFootprint::Circle,
         _ => RampFootprint::Rect,
     };
 
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(assets.material.clone()),
+    let mut entity = commands.spawn((
         transform,
         MovingRamp {
             half_extents,
@@ -1140,6 +1219,42 @@ fn spawn_one_ramp(
             segment_y_end: y_end,
         },
     ));
+
+    match profile {
+        RampProfile::Flat => {
+            let mut used_model = false;
+            if let Some(model) = flat_model {
+                if model.ready {
+                    entity.with_children(|parent| {
+                        for (mesh, material) in &model.primitives {
+                            parent.spawn((
+                                Mesh3d(mesh.clone()),
+                                MeshMaterial3d(material.clone()),
+                                Transform::from_scale(Vec3::splat(FLAT_RAMP_MODEL_SCALE)),
+                            ));
+                        }
+                    });
+                    used_model = true;
+                }
+            }
+            if !used_model {
+                entity.insert((
+                    Mesh3d(assets.mesh.clone()),
+                    MeshMaterial3d(assets.material.clone()),
+                ));
+            }
+        }
+        _ => {
+            let mesh = match profile {
+                RampProfile::Jump => assets.jump_mesh.clone(),
+                _ => assets.mesh.clone(),
+            };
+            entity.insert((
+                Mesh3d(mesh),
+                MeshMaterial3d(assets.material.clone()),
+            ));
+        }
+    }
 }
 
 /// Clamp the end height to a neighbor lane so lateral moves stay reasonable.
@@ -1256,6 +1371,7 @@ fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f3
 fn maybe_spawn_wall(
     commands: &mut Commands,
     assets: &RampRenderAssets,
+    flat_model: Option<&FlatRampModel>,
     config: &RampSpawnConfig,
     state: &mut RampSpawnState,
     floor_top_y: f32,
@@ -1286,6 +1402,7 @@ fn maybe_spawn_wall(
     spawn_one_ramp(
         commands,
         assets,
+        flat_model,
         config,
         x,
         wall_base_y,
