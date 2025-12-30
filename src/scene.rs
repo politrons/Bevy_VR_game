@@ -1,4 +1,5 @@
 use bevy::gltf::{Gltf, GltfLoaderSettings, GltfMesh};
+use bevy::image::ImageFilterMode;
 use bevy::prelude::*;
 use bevy_mod_xr::session::XrTrackingRoot;
 
@@ -6,6 +7,8 @@ const PLANET_MODEL_RADIUS_M: f32 = 1.0;
 const PLANET_VISUAL_RADIUS_M: f32 = 41.666668;
 const PLANET_ROTATION_SPEED_RAD_PER_SEC: f32 = 0.012;
 const PLANET_ROTATION_AXIS: Vec3 = Vec3::Y;
+const SPACE_SKY_MODEL_RADIUS_M: f32 = 1.0;
+const SPACE_SKY_VISUAL_RADIUS_M: f32 = 120.0;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct PlayerSpawn {
@@ -92,6 +95,24 @@ pub(crate) struct PlanetFloor {
     pub(crate) axis: Vec3,
     pub(crate) speed_rad_per_sec: f32,
 }
+
+/// Handles for the space sky visual that replaces the clear color.
+#[derive(Resource, Clone)]
+pub(crate) struct SpaceSkyAssets {
+    pub(crate) gltf: Handle<Gltf>,
+    pub(crate) fallback_material: Handle<StandardMaterial>,
+}
+
+/// Tracks whether the space sky has been spawned.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct SpaceSkyState {
+    pub(crate) spawned: bool,
+    pub(crate) failed: bool,
+}
+
+/// Space skybox entity (kept centered on the player).
+#[derive(Component)]
+pub(crate) struct SpaceSky;
 
 /// Creates the initial scene: a large road (playable floor), side/end walls, a textured
 /// debug cube (to validate Android asset loading), and a moving platform the player can ride.
@@ -230,6 +251,25 @@ pub(crate) fn setup_scene(
         fallback_material: planet_fallback_material,
     });
     commands.insert_resource(PlanetFloorState::default());
+
+    let sky_fallback_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.20, 0.20, 0.25),
+        unlit: true,
+        ..default()
+    });
+    let sky_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/space.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
+    commands.insert_resource(SpaceSkyAssets {
+        gltf: sky_gltf,
+        fallback_material: sky_fallback_material,
+    });
+    commands.insert_resource(SpaceSkyState::default());
 }
 
 /// Spawns the planet visual once the GLB has loaded, then hides the default floor meshes.
@@ -239,7 +279,7 @@ pub(crate) fn spawn_planet_floor(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     floor: Option<Res<FloorParams>>,
-    mut state: Option<ResMut<PlanetFloorState>>,
+    state: Option<ResMut<PlanetFloorState>>,
     floor_visuals: Query<Entity, With<FloorVisual>>,
     mut commands: Commands,
 ) {
@@ -321,6 +361,134 @@ pub(crate) fn spawn_planet_floor(
             state.failed = true;
         }
         _ => {}
+    }
+}
+
+/// Spawns the space skybox once the GLB has loaded.
+pub(crate) fn spawn_space_skybox(
+    assets: Option<Res<SpaceSkyAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    floor: Option<Res<FloorParams>>,
+    state: Option<ResMut<SpaceSkyState>>,
+    mut commands: Commands,
+) {
+    let (Some(assets), Some(mut state)) = (assets, state) else {
+        return;
+    };
+    if state.spawned || state.failed {
+        return;
+    }
+
+    let Some(load_state) = asset_server.get_load_state(assets.gltf.id()) else {
+        return;
+    };
+    match load_state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Space sky model has no meshes.");
+                state.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.fallback_material.clone());
+                    if let Some(mat) = materials.get_mut(&material) {
+                        if mat.base_color_texture.is_none() {
+                            if let Some(emissive_tex) = mat.emissive_texture.clone() {
+                                mat.base_color_texture = Some(emissive_tex);
+                            }
+                        }
+                        mat.base_color = Color::srgb(1.0, 1.0, 1.0);
+                        mat.unlit = true;
+                        mat.double_sided = true;
+                        mat.cull_mode = None;
+
+                        if let Some(texture) = mat.base_color_texture.clone() {
+                            tune_sky_sampler(&mut images, &texture);
+                        }
+                        if let Some(texture) = mat.emissive_texture.clone() {
+                            tune_sky_sampler(&mut images, &texture);
+                        }
+                    }
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Space sky model has no mesh primitives.");
+                state.failed = true;
+                return;
+            }
+
+            let radius = floor
+                .as_ref()
+                .map(|f| (f.half_extents.length() * 4.0).max(SPACE_SKY_VISUAL_RADIUS_M))
+                .unwrap_or(SPACE_SKY_VISUAL_RADIUS_M);
+            let scale = radius / SPACE_SKY_MODEL_RADIUS_M;
+            let sky = commands
+                .spawn((
+                    SpaceSky,
+                    Transform {
+                        scale: Vec3::splat(scale),
+                        ..default()
+                    },
+                    Name::new("SpaceSky"),
+                ))
+                .id();
+            commands.entity(sky).with_children(|parent| {
+                for (mesh, material) in &primitives {
+                    parent.spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::default(),
+                    ));
+                }
+            });
+
+            state.spawned = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Space sky model failed to load: {:?}", err);
+            state.failed = true;
+        }
+        _ => {}
+    }
+}
+
+fn tune_sky_sampler(images: &mut Assets<Image>, handle: &Handle<Image>) {
+    let Some(image) = images.get_mut(handle) else {
+        return;
+    };
+    let desc = image.sampler.get_or_init_descriptor();
+    desc.mag_filter = ImageFilterMode::Linear;
+    desc.min_filter = ImageFilterMode::Linear;
+    desc.mipmap_filter = ImageFilterMode::Linear;
+    desc.anisotropy_clamp = 16;
+}
+
+/// Keeps the space sky centered on the player so it feels infinite.
+pub(crate) fn sync_space_sky_position(
+    xr_root: Query<&Transform, (With<XrTrackingRoot>, Without<SpaceSky>)>,
+    mut skies: Query<&mut Transform, (With<SpaceSky>, Without<XrTrackingRoot>)>,
+) {
+    let Ok(root) = xr_root.single() else {
+        return;
+    };
+    for mut transform in &mut skies {
+        transform.translation = root.translation;
     }
 }
 

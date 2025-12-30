@@ -318,6 +318,9 @@ pub struct RampSpawnState {
 
     /// Per-lane lowest endpoint height of the last spawned segment.
     pub lane_last_low_y: Vec<f32>,
+
+    /// Lane index skipped on the previous row (to avoid repeating gaps).
+    pub last_skipped_lane: Option<usize>,
 }
 
 impl Default for RampSpawnState {
@@ -331,6 +334,7 @@ impl Default for RampSpawnState {
             lane_up_streak: Vec::new(),
             lane_down_streak: Vec::new(),
             lane_last_low_y: Vec::new(),
+            last_skipped_lane: None,
         }
     }
 }
@@ -411,7 +415,7 @@ pub(crate) fn prepare_flat_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
-    mut model: Option<ResMut<FlatRampModel>>,
+    model: Option<ResMut<FlatRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
         return;
@@ -468,7 +472,7 @@ pub(crate) fn prepare_jump_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
-    mut model: Option<ResMut<JumpRampModel>>,
+    model: Option<ResMut<JumpRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
         return;
@@ -525,7 +529,7 @@ pub(crate) fn prepare_slide_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
-    mut model: Option<ResMut<SlideRampModel>>,
+    model: Option<ResMut<SlideRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
         return;
@@ -660,7 +664,8 @@ pub(crate) fn spawn_moving_ramps(
                 (DownhillPhase::FlatUp, None)
             };
             let skip_lane = if is_downhill_like(mode) && config.lanes > 1 {
-                Some((rng_u32(&mut state.seed) as usize) % config.lanes)
+                let last_skipped_lane = state.last_skipped_lane;
+                pick_skip_lane(&mut state.seed, config.lanes, last_skipped_lane)
             } else {
                 None
             };
@@ -787,6 +792,7 @@ pub(crate) fn spawn_moving_ramps(
                 state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
                 prev_lane_end_y = Some(end_y_rel);
             }
+            state.last_skipped_lane = skip_lane;
         }
     }
 
@@ -807,7 +813,8 @@ pub(crate) fn spawn_moving_ramps(
     };
 
     let skip_lane = if is_downhill_like(mode) && config.lanes > 1 {
-        Some((rng_u32(&mut state.seed) as usize) % config.lanes)
+        let last_skipped_lane = state.last_skipped_lane;
+        pick_skip_lane(&mut state.seed, config.lanes, last_skipped_lane)
     } else {
         None
     };
@@ -920,6 +927,29 @@ pub(crate) fn spawn_moving_ramps(
         state.lane_last_low_y[lane] = start_y_rel.min(end_y_rel);
         prev_lane_end_y = Some(end_y_rel);
     }
+    state.last_skipped_lane = skip_lane;
+}
+
+/// Picks a lane to skip, avoiding the previous skipped lane when possible.
+fn pick_skip_lane(seed: &mut u32, lanes: usize, last: Option<usize>) -> Option<usize> {
+    if lanes <= 1 {
+        return None;
+    }
+    let mut lane = (rng_u32(seed) as usize) % lanes;
+    if let Some(prev) = last {
+        if lanes > 1 && lane == prev {
+            for _ in 0..4 {
+                lane = (rng_u32(seed) as usize) % lanes;
+                if lane != prev {
+                    break;
+                }
+            }
+            if lane == prev {
+                lane = (prev + 1) % lanes;
+            }
+        }
+    }
+    Some(lane)
 }
 
 /// Updates all [`MovingRamp`] entities by advancing them forward in Z only.
@@ -970,26 +1000,14 @@ fn choose_next_lane_segment(
 
     let profile = choose_next_profile(config, state, lane, last, in_low_band, in_high_band);
 
-    let mut profile = profile;
-
     // The vertical delta depends on the *actual* segment length.
     let base_len_z = config.ramp_dimensions_m.z;
     let flat_step_m = config.max_vertical_step_cross_lane_m;
     let next_anchor_y_rel = (prev_anchor_y_rel + flat_step_m).min(config.max_height_above_floor_m);
-    let mut start_y_rel = prev_anchor_y_rel;
-    let mut end_y_rel = prev_anchor_y_rel;
-
-    match profile {
-        RampProfile::Flat | RampProfile::Jump => {
-            start_y_rel = next_anchor_y_rel;
-            end_y_rel = next_anchor_y_rel;
-        }
-        RampProfile::Wall => {
-            // Wall segments are not part of lane continuity. Fall back to flat behavior.
-            profile = RampProfile::Flat;
-            start_y_rel = next_anchor_y_rel;
-            end_y_rel = next_anchor_y_rel;
-        }
+    let (profile, mut start_y_rel, mut end_y_rel) = match profile {
+        RampProfile::Flat => (RampProfile::Flat, next_anchor_y_rel, next_anchor_y_rel),
+        RampProfile::Jump => (RampProfile::Jump, next_anchor_y_rel, next_anchor_y_rel),
+        RampProfile::Wall => (RampProfile::Flat, next_anchor_y_rel, next_anchor_y_rel),
         RampProfile::Inclined { dir, angle_deg } => {
             // IMPORTANT:
             // The ramp mesh is rotated by `angle_deg` in `spawn_one_ramp`.
@@ -1016,30 +1034,38 @@ fn choose_next_lane_segment(
                     } else {
                         prev_anchor_y_rel
                     };
-                    end_y_rel = up_anchor_y_rel;
-                    start_y_rel = up_anchor_y_rel - rise;
+                    let end_y_rel = up_anchor_y_rel;
+                    let start_y_rel = up_anchor_y_rel - rise;
 
                     // If the lower end would hit the floor, fall back to a higher flat segment.
                     if start_y_rel < config.min_height_above_floor_m {
-                        profile = RampProfile::Flat;
-                        start_y_rel = next_anchor_y_rel;
-                        end_y_rel = next_anchor_y_rel;
+                        (RampProfile::Flat, next_anchor_y_rel, next_anchor_y_rel)
+                    } else {
+                        (
+                            RampProfile::Inclined { dir, angle_deg },
+                            start_y_rel,
+                            end_y_rel,
+                        )
                     }
                 }
                 RampSlopeDir::Down => {
                     // Align the highest point of a DOWN ramp to the same baseline
                     // a flat/up segment would start at.
-                    start_y_rel = next_anchor_y_rel;
-                    end_y_rel = next_anchor_y_rel - rise;
+                    let start_y_rel = next_anchor_y_rel;
+                    let end_y_rel = next_anchor_y_rel - rise;
                     if end_y_rel < config.min_height_above_floor_m {
-                        profile = RampProfile::Flat;
-                        start_y_rel = next_anchor_y_rel;
-                        end_y_rel = next_anchor_y_rel;
+                        (RampProfile::Flat, next_anchor_y_rel, next_anchor_y_rel)
+                    } else {
+                        (
+                            RampProfile::Inclined { dir, angle_deg },
+                            start_y_rel,
+                            end_y_rel,
+                        )
                     }
                 }
             }
         }
-    }
+    };
 
     // After an UP ramp, a flat segment must not be above the low endpoint of that ramp.
     if profile.is_flat_like() && last.is_up() {

@@ -483,7 +483,6 @@ pub fn handle_player(
     if landed_this_frame && kind == GroundKind::JumpRamp {
         kin.vertical_velocity = settings.jump_velocity_mps * 3.0;
         kin.ramp_velocity_z = 0.0;
-        grounded = false;
     }
 
     // Wall collision: touching a wall always resets.
