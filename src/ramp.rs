@@ -1422,7 +1422,7 @@ fn spawn_one_ramp(
             if let Some(model) = flat_model {
                 if model.ready {
                     entity.with_children(|parent| {
-                        for (mesh, material) in &model.primitives {
+                        if let Some((mesh, material)) = model.primitives.first() {
                             parent.spawn((
                                 Mesh3d(mesh.clone()),
                                 MeshMaterial3d(material.clone()),
@@ -1445,7 +1445,7 @@ fn spawn_one_ramp(
             if let Some(model) = jump_model {
                 if model.ready {
                     entity.with_children(|parent| {
-                        for (mesh, material) in &model.primitives {
+                        if let Some((mesh, material)) = model.primitives.first() {
                             parent.spawn((
                                 Mesh3d(mesh.clone()),
                                 MeshMaterial3d(material.clone()),
@@ -1472,7 +1472,7 @@ fn spawn_one_ramp(
             if let Some(model) = slide_model {
                 if model.ready {
                     entity.with_children(|parent| {
-                        for (mesh, material) in &model.primitives {
+                        if let Some((mesh, material)) = model.primitives.first() {
                             parent.spawn((
                                 Mesh3d(mesh.clone()),
                                 MeshMaterial3d(material.clone()),
