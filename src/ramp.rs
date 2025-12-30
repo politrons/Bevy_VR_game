@@ -30,6 +30,7 @@ const JUMP_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
 const SLIDE_RAMP_MODEL_SCALE: f32 = 2.0;
 const SLIDE_RAMP_MODEL_YAW_RAD: f32 = std::f32::consts::FRAC_PI_2;
+const DOWN_RAMP_SPAWN_PROB: f32 = 0.20;
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -284,8 +285,8 @@ impl Default for RampSpawnConfig {
             min_height_above_floor_m: 25.0,
             max_height_above_floor_m: 40.0,
             lane_x_jitter_m: 0.8,
-            ramp_speed_z_mps: 5.0,
-            spawn_interval_s: 1.6 / 1.0, // Adjusted for faster ramps to keep spacing
+            ramp_speed_z_mps: 4.0,
+            spawn_interval_s: 1.92, // 20% slower to keep pacing with ramp speed
             max_vertical_step_cross_lane_m: 0.9,
             flat_probability_mid_band: 0.50,
             jump_probability: 0.15,
@@ -1273,11 +1274,14 @@ fn choose_next_profile(
         0.5
     };
 
-    let dir = if rng_f32_01(&mut state.seed) < up_prob {
+    let mut dir = if rng_f32_01(&mut state.seed) < up_prob {
         RampSlopeDir::Up
     } else {
         RampSlopeDir::Down
     };
+    if dir == RampSlopeDir::Down && rng_f32_01(&mut state.seed) > DOWN_RAMP_SPAWN_PROB {
+        dir = RampSlopeDir::Up;
+    }
 
     let angle = if dir == RampSlopeDir::Down {
         angle.min(config.max_down_angle_deg)
