@@ -1,9 +1,11 @@
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
 use bevy::gltf::{Gltf, GltfLoaderSettings, GltfMesh};
+use std::collections::HashMap;
+use bevy_mod_xr::session::XrTrackingRoot;
 
 use crate::gameplay::{DownhillPhase, GameplayMode, GameplayState};
-use crate::scene::{FloorParams, FloorTopY};
+use crate::scene::{FloorParams, FloorTopY, PLANET_VISUAL_RADIUS_M};
 
 /// Ramp slope direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,8 @@ const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
 const SLIDE_RAMP_MODEL_SCALE: f32 = 2.0;
 const SLIDE_RAMP_MODEL_YAW_RAD: f32 = std::f32::consts::FRAC_PI_2;
 const DOWN_RAMP_SPAWN_PROB: f32 = 0.20;
+const RAMP_CURVATURE_STRENGTH: f32 = 2.0;
+const RAMP_CURVATURE_MAX_DIST_SCALE: f32 = 0.8;
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -184,6 +188,30 @@ pub struct RampRenderAssets {
 }
 
 #[derive(Resource, Default)]
+pub struct RampLodMaterials {
+    unlit_by_lit: HashMap<Handle<StandardMaterial>, Handle<StandardMaterial>>,
+}
+
+#[derive(Component, Clone)]
+pub(crate) struct RampLodMaterial {
+    lit: Handle<StandardMaterial>,
+    is_unlit: bool,
+    base_translation: Vec3,
+    base_rotation: Quat,
+}
+
+impl RampLodMaterial {
+    fn new(lit: Handle<StandardMaterial>, base_translation: Vec3, base_rotation: Quat) -> Self {
+        Self {
+            lit,
+            is_unlit: false,
+            base_translation,
+            base_rotation,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
 pub struct FlatRampModel {
     pub ready: bool,
     pub failed: bool,
@@ -245,6 +273,12 @@ pub struct RampSpawnConfig {
     /// Interval between ramp spawns in seconds.
     pub spawn_interval_s: f32,
 
+    /// Extra distance (meters) to extend the spawn window behind the floor.
+    pub spawn_z_extend_m: f32,
+
+    /// Distance from the player (meters) where ramps switch to unlit materials.
+    pub ramp_unlit_distance_z_m: f32,
+
     /// Max allowed vertical difference between adjacent lanes for ramps spawned at the same Z step.
     pub max_vertical_step_cross_lane_m: f32,
 
@@ -287,6 +321,8 @@ impl Default for RampSpawnConfig {
             lane_x_jitter_m: 0.8,
             ramp_speed_z_mps: 4.0,
             spawn_interval_s: 1.92, // 20% slower to keep pacing with ramp speed
+            spawn_z_extend_m: 48.0,
+            ramp_unlit_distance_z_m: 30.0,
             max_vertical_step_cross_lane_m: 0.9,
             flat_probability_mid_band: 0.50,
             jump_probability: 0.15,
@@ -406,6 +442,7 @@ pub(crate) fn setup_ramp_spawner(
     commands.insert_resource(FlatRampModel::default());
     commands.insert_resource(JumpRampModel::default());
     commands.insert_resource(SlideRampModel::default());
+    commands.insert_resource(RampLodMaterials::default());
     commands.insert_resource(config);
     commands.insert_resource(RampSpawnState::default());
 }
@@ -583,7 +620,7 @@ pub(crate) fn prepare_slide_ramp_model(
 
 /// Spawn ramps continuously.
 ///
-/// Ramps always spawn fully on the floor (their footprint must fit inside the floor).
+/// Ramps spawn fully inside a window that extends behind the floor for distant visuals.
 /// Spawning follows *path continuity* rules per lane:
 /// - In the mid-band, we forbid UP->UP and DOWN->DOWN.
 /// - Near the bottom, UP streaks are allowed (to climb).
@@ -625,8 +662,9 @@ pub(crate) fn spawn_moving_ramps(
 
     let x_spawn_min = x_min + ramp_half_x;
     let x_spawn_max = x_max - ramp_half_x;
-    let z_spawn_min = z_start + ramp_half_z;
+    let z_spawn_min = z_start - config.spawn_z_extend_m + ramp_half_z;
     let z_spawn_max = z_end - ramp_half_z;
+    let z_despawn_min = z_spawn_min - ramp_half_z - 0.5;
 
     // If the floor is too small to fit ramps, do nothing.
     if x_spawn_min >= x_spawn_max || z_spawn_min >= z_spawn_max {
@@ -650,7 +688,15 @@ pub(crate) fn spawn_moving_ramps(
     if !state.initialized {
         state.initialized = true;
 
-        for i in 0..config.initial_ramps_per_lane {
+        let prefill_count = if config.z_spacing_m > f32::EPSILON {
+            let span = (z_spawn_max - z_spawn_min).max(0.0);
+            let needed = (span / config.z_spacing_m).ceil() as usize + 1;
+            config.initial_ramps_per_lane.max(needed)
+        } else {
+            config.initial_ramps_per_lane
+        };
+
+        for i in 0..prefill_count {
             let z_base = z_spawn_min + (i as f32) * config.z_spacing_m;
             if z_base > z_spawn_max {
                 break;
@@ -756,7 +802,7 @@ pub(crate) fn spawn_moving_ramps(
                     floor_top_y + start_y_rel,
                     floor_top_y + end_y_rel,
                     z,
-                    z_start,
+                    z_despawn_min,
                     z_end,
                     profile,
                 );
@@ -772,7 +818,7 @@ pub(crate) fn spawn_moving_ramps(
                         floor_top_y,
                         x,
                         z,
-                        z_start,
+                        z_despawn_min,
                         z_end,
                         profile,
                         end_y_rel,
@@ -892,7 +938,7 @@ pub(crate) fn spawn_moving_ramps(
             floor_top_y + start_y_rel,
             floor_top_y + end_y_rel,
             z,
-            z_start,
+            z_despawn_min,
             z_end,
             profile,
         );
@@ -908,7 +954,7 @@ pub(crate) fn spawn_moving_ramps(
                 floor_top_y,
                 x,
                 z,
-                z_start,
+                z_despawn_min,
                 z_end,
                 profile,
                 end_y_rel,
@@ -975,6 +1021,96 @@ pub(crate) fn move_ramps(
             commands.entity(e).despawn();
         }
     }
+}
+
+/// Swaps ramp materials to unlit when they are far from the player.
+pub(crate) fn update_ramp_lod(
+    xr_root: Query<&GlobalTransform, With<XrTrackingRoot>>,
+    floor: Option<Res<FloorParams>>,
+    config: Res<RampSpawnConfig>,
+    mut lod_cache: ResMut<RampLodMaterials>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut ramps: Query<(
+        &GlobalTransform,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+        &mut RampLodMaterial,
+        Option<&ChildOf>,
+    )>,
+) {
+    let Ok(root) = xr_root.single() else {
+        return;
+    };
+    let player_z = root.translation().z;
+    let cutoff = config.ramp_unlit_distance_z_m.max(0.0);
+    let blend = config.spawn_z_extend_m.max(0.1);
+    let floor = floor.as_deref();
+
+    let apply_curvature = |floor: &FloorParams,
+                           global: &GlobalTransform,
+                           local: &mut Transform,
+                           lod: &RampLodMaterial,
+                           curvature_t: f32| {
+        let radius = PLANET_VISUAL_RADIUS_M.max(0.1);
+        let dx = global.translation().x - floor.center.x;
+        let dz_center = global.translation().z - floor.center.z;
+        let max_dist = (radius * RAMP_CURVATURE_MAX_DIST_SCALE).max(0.0);
+        let max_sq = (max_dist * max_dist).min(radius * radius * 0.999);
+        let dist_sq = (dx * dx + dz_center * dz_center).min(max_sq);
+        let drop = radius - (radius * radius - dist_sq).sqrt();
+        let offset_y = -(drop * RAMP_CURVATURE_STRENGTH) * curvature_t;
+        local.translation = lod.base_translation + Vec3::new(0.0, offset_y, 0.0);
+        local.rotation = lod.base_rotation;
+    };
+
+    for (global, mut local, mut material, mut lod, parent) in &mut ramps {
+        let dz = (global.translation().z - player_z).abs();
+        let wants_unlit = dz >= cutoff;
+        let curvature_t = ((dz - cutoff) / blend).clamp(0.0, 1.0);
+        if wants_unlit == lod.is_unlit {
+            // Still update curvature for distant visuals.
+            if let (Some(_parent), Some(floor)) = (parent, floor) {
+                apply_curvature(floor, global, &mut local, &lod, curvature_t);
+            } else if parent.is_some() {
+                local.translation = lod.base_translation;
+                local.rotation = lod.base_rotation;
+            }
+            continue;
+        }
+
+        if wants_unlit {
+            let Some(unlit) = ensure_unlit_material(&mut lod_cache, &mut materials, &lod.lit) else {
+                continue;
+            };
+            *material = MeshMaterial3d(unlit);
+            lod.is_unlit = true;
+        } else {
+            *material = MeshMaterial3d(lod.lit.clone());
+            lod.is_unlit = false;
+        }
+
+        if let (Some(_parent), Some(floor)) = (parent, floor) {
+            apply_curvature(floor, global, &mut local, &lod, curvature_t);
+        } else if parent.is_some() {
+            local.translation = lod.base_translation;
+            local.rotation = lod.base_rotation;
+        }
+    }
+}
+
+fn ensure_unlit_material(
+    cache: &mut RampLodMaterials,
+    materials: &mut Assets<StandardMaterial>,
+    lit: &Handle<StandardMaterial>,
+) -> Option<Handle<StandardMaterial>> {
+    if let Some(existing) = cache.unlit_by_lit.get(lit) {
+        return Some(existing.clone());
+    }
+    let mut material = materials.get(lit)?.clone();
+    material.unlit = true;
+    let handle = materials.add(material);
+    cache.unlit_by_lit.insert(lit.clone(), handle.clone());
+    Some(handle)
 }
 
 fn is_downhill_like(mode: GameplayMode) -> bool {
@@ -1304,8 +1440,8 @@ fn spawn_one_ramp(
     y_start: f32,
     y_end: f32,
     z: f32,
-    z_start: f32,
-    z_end: f32,
+    z_min: f32,
+    z_max: f32,
     profile: RampProfile,
 ) {
     let thickness = config.ramp_dimensions_m.y;
@@ -1405,8 +1541,8 @@ fn spawn_one_ramp(
             footprint,
             thickness,
             z_speed_mps: config.ramp_speed_z_mps,
-            z_min: z_start,
-            z_max: z_end + half_extents.y + 0.5,
+            z_min,
+            z_max: z_max + half_extents.y + 0.5,
             current_vel: Vec3::new(0.0, 0.0, config.ramp_speed_z_mps),
             profile,
             segment_z_start,
@@ -1426,6 +1562,11 @@ fn spawn_one_ramp(
                             parent.spawn((
                                 Mesh3d(mesh.clone()),
                                 MeshMaterial3d(material.clone()),
+                                RampLodMaterial::new(
+                                    material.clone(),
+                                    Vec3::ZERO,
+                                    Quat::IDENTITY,
+                                ),
                                 Transform::from_scale(Vec3::splat(FLAT_RAMP_MODEL_SCALE)),
                             ));
                         }
@@ -1437,6 +1578,11 @@ fn spawn_one_ramp(
                 entity.insert((
                     Mesh3d(assets.mesh.clone()),
                     MeshMaterial3d(assets.material.clone()),
+                    RampLodMaterial::new(
+                        assets.material.clone(),
+                        transform.translation,
+                        transform.rotation,
+                    ),
                 ));
             }
         }
@@ -1449,6 +1595,11 @@ fn spawn_one_ramp(
                             parent.spawn((
                                 Mesh3d(mesh.clone()),
                                 MeshMaterial3d(material.clone()),
+                                RampLodMaterial::new(
+                                    material.clone(),
+                                    Vec3::ZERO,
+                                    Quat::from_rotation_y(JUMP_RAMP_MODEL_YAW_RAD),
+                                ),
                                 Transform {
                                     rotation: Quat::from_rotation_y(JUMP_RAMP_MODEL_YAW_RAD),
                                     scale: Vec3::splat(JUMP_RAMP_MODEL_SCALE),
@@ -1464,6 +1615,11 @@ fn spawn_one_ramp(
                 entity.insert((
                     Mesh3d(assets.jump_mesh.clone()),
                     MeshMaterial3d(assets.material.clone()),
+                    RampLodMaterial::new(
+                        assets.material.clone(),
+                        transform.translation,
+                        transform.rotation,
+                    ),
                 ));
             }
         }
@@ -1476,6 +1632,11 @@ fn spawn_one_ramp(
                             parent.spawn((
                                 Mesh3d(mesh.clone()),
                                 MeshMaterial3d(material.clone()),
+                                RampLodMaterial::new(
+                                    material.clone(),
+                                    Vec3::ZERO,
+                                    Quat::from_rotation_y(SLIDE_RAMP_MODEL_YAW_RAD),
+                                ),
                                 Transform {
                                     rotation: Quat::from_rotation_y(SLIDE_RAMP_MODEL_YAW_RAD),
                                     scale: Vec3::splat(SLIDE_RAMP_MODEL_SCALE),
@@ -1491,6 +1652,11 @@ fn spawn_one_ramp(
                 entity.insert((
                     Mesh3d(assets.mesh.clone()),
                     MeshMaterial3d(assets.material.clone()),
+                    RampLodMaterial::new(
+                        assets.material.clone(),
+                        transform.translation,
+                        transform.rotation,
+                    ),
                 ));
             }
         }
@@ -1498,6 +1664,11 @@ fn spawn_one_ramp(
             entity.insert((
                 Mesh3d(assets.mesh.clone()),
                 MeshMaterial3d(assets.material.clone()),
+                RampLodMaterial::new(
+                    assets.material.clone(),
+                    transform.translation,
+                    transform.rotation,
+                ),
             ));
         }
     }
@@ -1625,8 +1796,8 @@ fn maybe_spawn_wall(
     floor_top_y: f32,
     x: f32,
     z: f32,
-    z_start: f32,
-    z_end: f32,
+    z_min: f32,
+    z_max: f32,
     profile: RampProfile,
     end_y_rel: f32,
 ) {
@@ -1638,8 +1809,8 @@ fn maybe_spawn_wall(
     let wall_half_z = config.ramp_dimensions_m.y * 0.5;
     let wall_z = z + ramp_half_z + wall_half_z + config.wall_gap_m;
 
-    let wall_z_min = z_start + wall_half_z;
-    let wall_z_max = z_end - wall_half_z;
+    let wall_z_min = z_min + wall_half_z;
+    let wall_z_max = z_max - wall_half_z;
     if wall_z < wall_z_min || wall_z > wall_z_max {
         return;
     }
@@ -1658,8 +1829,8 @@ fn maybe_spawn_wall(
         wall_base_y,
         wall_top_y,
         wall_z,
-        z_start,
-        z_end,
+        z_min,
+        z_max,
         RampProfile::Wall,
     );
 }

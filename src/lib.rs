@@ -6,6 +6,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::schedule::common_conditions::resource_exists;
 use bevy::prelude::*;
 use bevy::render::view::{Hdr, Msaa, NoIndirectDrawing};
+use bevy::transform::TransformSystems;
 use bevy_mod_openxr::{add_xr_plugins, openxr_session_running, resources::OxrViews};
 use bevy_mod_xr::camera::{XrCamera, XrViewInit};
 use bevy_mod_xr::session::XrSessionCreated;
@@ -55,8 +56,8 @@ use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
 use crate::ramp::{
     move_ramps, prepare_flat_ramp_model, prepare_jump_ramp_model, prepare_slide_ramp_model,
-    setup_ramp_spawner, spawn_moving_ramps, FlatRampModel, JumpRampModel, SlideRampModel,
-    RampRenderAssets, RampSpawnConfig, RampSpawnState,
+    setup_ramp_spawner, spawn_moving_ramps, update_ramp_lod, FlatRampModel, JumpRampModel,
+    SlideRampModel, RampLodMaterials, RampRenderAssets, RampSpawnConfig, RampSpawnState,
 };
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
@@ -133,6 +134,14 @@ fn main() {
                 .run_if(resource_exists::<GameplayState>),
         )
         .add_systems(Update, move_ramps.run_if(openxr_session_running))
+        .add_systems(
+            PostUpdate,
+            update_ramp_lod
+                .after(TransformSystems::Propagate)
+                .run_if(openxr_session_running)
+                .run_if(resource_exists::<RampLodMaterials>)
+                .run_if(resource_exists::<RampSpawnConfig>),
+        )
         .add_systems(
             Update,
             spawn_moving_ramps

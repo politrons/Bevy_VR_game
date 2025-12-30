@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy_mod_xr::session::XrTrackingRoot;
 
 const PLANET_MODEL_RADIUS_M: f32 = 1.0;
-const PLANET_VISUAL_RADIUS_M: f32 = 41.666668;
+pub(crate) const PLANET_VISUAL_RADIUS_M: f32 = 83.333336;
 const PLANET_ROTATION_SPEED_RAD_PER_SEC: f32 = 0.012;
 const PLANET_ROTATION_AXIS: Vec3 = Vec3::Y;
 const SPACE_SKY_MODEL_RADIUS_M: f32 = 1.0;
