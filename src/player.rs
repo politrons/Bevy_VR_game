@@ -323,8 +323,9 @@ pub fn handle_player(
     // - First, to know what surface we're currently on (for ramp sliding / surface carry).
     // - Second, after we move in X/Z, to resolve Y correctly at the *new* position.
     //   This avoids jitter where we move along Z but still snap Y to the old surface.
-    let (_ground_y_before, ground_vel_before, kind_before, slope_dy_dz_before) =
-        ground_y_and_velocity(root.translation, &road, &ramps);
+    let start_pos = root.translation;
+    let (ground_y_before, ground_vel_before, kind_before, slope_dy_dz_before) =
+        ground_y_and_velocity(start_pos, &road, &ramps);
 
     // Carry the player by the motion of the surface they are standing on.
     root.translation += ground_vel_before * dt;
@@ -423,7 +424,16 @@ pub fn handle_player(
     // We only consider the player grounded when they are close to the surface *and*
     // they are not moving upward. This avoids counting side-swipes as a "landing".
     let snap_eps = 0.06;
-    let mut grounded = (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05;
+    let ramp_snap_eps = RAMP_ABOVE_EPS.max(snap_eps);
+    let mut grounded = match kind {
+        GroundKind::Ramp | GroundKind::JumpRamp => {
+            (root.translation.y - ground_y).abs() <= ramp_snap_eps
+                && kin.vertical_velocity <= 0.05
+        }
+        GroundKind::Road => {
+            (root.translation.y - ground_y).abs() <= snap_eps && kin.vertical_velocity <= 0.05
+        }
+    };
     let mut landed_this_frame = grounded && prev_y > ground_y + snap_eps;
 
     // Track progress: if you're grounded on a ramp, consider it "touched".
@@ -450,7 +460,16 @@ pub fn handle_player(
     // IMPORTANT: if we jump this frame, we must treat the player as airborne immediately.
     // Otherwise the "grounded" branch below would snap Y to the surface and reset
     // `vertical_velocity` back to 0 in the same frame (making jumps appear broken).
-    let jumped_this_frame = jump_pressed_edge && grounded;
+    let grounded_start = match kind_before {
+        GroundKind::Ramp | GroundKind::JumpRamp => {
+            (start_pos.y - ground_y_before).abs() <= ramp_snap_eps
+                && kin.vertical_velocity <= 0.05
+        }
+        GroundKind::Road => {
+            (start_pos.y - ground_y_before).abs() <= snap_eps && kin.vertical_velocity <= 0.05
+        }
+    };
+    let jumped_this_frame = jump_pressed_edge && grounded_start;
     if jumped_this_frame {
         kin.vertical_velocity = settings.jump_velocity_mps;
         // Jumping cancels ramp sliding so we don't carry weird lateral speed into the air.
