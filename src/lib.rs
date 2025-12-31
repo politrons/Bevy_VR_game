@@ -55,9 +55,10 @@ use crate::player::{
 use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
 use crate::ramp::{
-    move_ramps, prepare_flat_ramp_model, prepare_jump_ramp_model, prepare_slide_ramp_model,
-    setup_ramp_spawner, spawn_moving_ramps, update_ramp_lod, FlatRampModel, JumpRampModel,
-    SlideRampModel, RampLodMaterials, RampRenderAssets, RampSpawnConfig, RampSpawnState,
+    move_ramps, prepare_flat_ramp_model, prepare_grind_ramp_model, prepare_jump_ramp_model,
+    prepare_slide_ramp_model, setup_ramp_spawner, spawn_moving_ramps, update_ramp_lod,
+    FlatRampModel, GrindRampModel, JumpRampModel, SlideRampModel, RampLodMaterials,
+    RampRenderAssets, RampSpawnConfig, RampSpawnState,
 };
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
@@ -100,6 +101,12 @@ fn main() {
             Update,
             prepare_jump_ramp_model
                 .run_if(resource_exists::<JumpRampModel>)
+                .run_if(resource_exists::<RampRenderAssets>),
+        )
+        .add_systems(
+            Update,
+            prepare_grind_ramp_model
+                .run_if(resource_exists::<GrindRampModel>)
                 .run_if(resource_exists::<RampRenderAssets>),
         )
         .add_systems(

@@ -21,6 +21,8 @@ pub enum RampProfile {
     Flat,
     /// A flat jump pad that auto-launches the player.
     Jump,
+    /// A flat grind ramp that slides the player like an up ramp.
+    Grind { slide_angle_deg: f32 },
     /// A vertical wall obstacle (not walkable).
     Wall,
     /// An inclined ramp segment.
@@ -40,6 +42,10 @@ const DEBUG_SURFACE_Y_SCALE: f32 = 0.08;
 const DEBUG_SURFACE_Y_EPS: f32 = 0.01;
 const FLAT_SEGMENT_LENGTH_SCALE: f32 = 0.90;
 const JUMP_DEBUG_Y_OFFSET_SCALE: f32 = 0.50;
+const GRIND_RAMP_WIDTH_SCALE: f32 = 0.70;
+const GRIND_RAMP_LENGTH_SCALE: f32 = 1.50;
+const GRIND_RAMP_MODEL_LENGTH_SCALE: f32 = GRIND_RAMP_LENGTH_SCALE * 1.50;
+const FORCE_GRIND_ONLY: bool = false;
 const UP_RAMP_PHYS_X_SCALE: f32 = 1.20;
 const UP_RAMP_PHYS_Z_SCALE: f32 = 1.30;
 const BASE_INCLINE_LENGTH_SCALE: f32 = 0.70;
@@ -69,7 +75,7 @@ impl RampProfile {
     }
 
     fn is_flat_like(self) -> bool {
-        matches!(self, RampProfile::Flat | RampProfile::Jump)
+        matches!(self, RampProfile::Flat | RampProfile::Jump | RampProfile::Grind { .. })
     }
 }
 
@@ -138,7 +144,8 @@ impl MovingRamp {
     ///
     /// This is the helper the player uses to decide whether it is standing on the ramp.
     ///
-    /// - For a [`RampProfile::Flat`] or [`RampProfile::Jump`] segment, the surface is constant.
+    /// - For a [`RampProfile::Flat`], [`RampProfile::Jump`], or [`RampProfile::Grind`] segment,
+    ///   the surface is constant.
     /// - For an inclined segment, the surface is linearly interpolated between `segment_y_start`
     ///   and `segment_y_end` across `[segment_z_start, segment_z_end]`.
     ///
@@ -166,7 +173,7 @@ impl MovingRamp {
         // This is equivalent to linear interpolation between start/end, but makes the intent explicit
         // and stays correct even if (for any reason) start/end heights end up swapped.
         let top_y = match self.profile {
-            RampProfile::Flat | RampProfile::Jump => self.segment_y_start,
+            RampProfile::Flat | RampProfile::Jump | RampProfile::Grind { .. } => self.segment_y_start,
             RampProfile::Inclined {
                 dir: RampSlopeDir::Down,
                 ..
@@ -196,6 +203,9 @@ impl MovingRamp {
         if self.profile == RampProfile::Wall {
             return 0.0;
         }
+        if let RampProfile::Grind { slide_angle_deg } = self.profile {
+            return slide_angle_deg.to_radians().sin();
+        }
         let len = self.segment_z_end - self.segment_z_start;
         if len.abs() <= f32::EPSILON {
             return 0.0;
@@ -215,6 +225,7 @@ pub struct RampRenderAssets {
     pub flat_gltf: Handle<Gltf>,
     pub jump_gltf: Handle<Gltf>,
     pub slide_gltf: Handle<Gltf>,
+    pub grind_gltf: Handle<Gltf>,
 }
 
 #[derive(Resource, Default)]
@@ -250,6 +261,13 @@ pub struct FlatRampModel {
 
 #[derive(Resource, Default)]
 pub struct JumpRampModel {
+    pub ready: bool,
+    pub failed: bool,
+    pub primitives: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+}
+
+#[derive(Resource, Default)]
+pub struct GrindRampModel {
     pub ready: bool,
     pub failed: bool,
     pub primitives: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
@@ -316,6 +334,8 @@ pub struct RampSpawnConfig {
     pub flat_probability_mid_band: f32,
     /// Chance for a flat segment to become a jump pad (RandomGameplay only).
     pub jump_probability: f32,
+    /// Chance for a flat segment to become a grind ramp (RandomGameplay only).
+    pub grind_probability: f32,
     /// Chance to spawn a wall after a lane (ShooterGameplay only).
     pub wall_spawn_probability: f32,
     /// Gap in meters between a spawned ramp and its wall.
@@ -356,6 +376,7 @@ impl Default for RampSpawnConfig {
             max_vertical_step_cross_lane_m: 0.9,
             flat_probability_mid_band: 0.50,
             jump_probability: 0.15,
+            grind_probability: 0.10,
             wall_spawn_probability: 0.30,
             wall_gap_m: 0.2,
             low_band_y_m: 3.0,
@@ -468,6 +489,14 @@ pub(crate) fn setup_ramp_spawner(
             settings.load_animations = false;
         },
     );
+    let grind_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/grind.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
 
     commands.insert_resource(RampRenderAssets {
         mesh: ramp_mesh,
@@ -477,9 +506,11 @@ pub(crate) fn setup_ramp_spawner(
         flat_gltf,
         jump_gltf,
         slide_gltf,
+        grind_gltf,
     });
     commands.insert_resource(FlatRampModel::default());
     commands.insert_resource(JumpRampModel::default());
+    commands.insert_resource(GrindRampModel::default());
     commands.insert_resource(SlideRampModel::default());
     commands.insert_resource(RampLodMaterials::default());
     commands.insert_resource(config);
@@ -600,6 +631,63 @@ pub(crate) fn prepare_jump_ramp_model(
     }
 }
 
+/// Caches the grind ramp GLB mesh primitives once the asset is loaded.
+pub(crate) fn prepare_grind_ramp_model(
+    assets: Option<Res<RampRenderAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    model: Option<ResMut<GrindRampModel>>,
+) {
+    let (Some(assets), Some(mut model)) = (assets, model) else {
+        return;
+    };
+    if model.ready || model.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.grind_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.grind_gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Grind ramp model has no meshes.");
+                model.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.material.clone());
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Grind ramp model has no mesh primitives.");
+                model.failed = true;
+                return;
+            }
+            model.primitives = primitives;
+            model.ready = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Grind ramp model failed to load: {:?}", err);
+            model.failed = true;
+        }
+        _ => {}
+    }
+}
+
 /// Caches the slide ramp GLB mesh primitives once the asset is loaded.
 pub(crate) fn prepare_slide_ramp_model(
     assets: Option<Res<RampRenderAssets>>,
@@ -674,6 +762,7 @@ pub(crate) fn spawn_moving_ramps(
     assets: Res<RampRenderAssets>,
     flat_model: Option<Res<FlatRampModel>>,
     jump_model: Option<Res<JumpRampModel>>,
+    grind_model: Option<Res<GrindRampModel>>,
     slide_model: Option<Res<SlideRampModel>>,
     gameplay: Option<ResMut<GameplayState>>,
 ) {
@@ -682,6 +771,7 @@ pub(crate) fn spawn_moving_ramps(
         .as_ref()
         .map(|g| g.current)
         .unwrap_or(GameplayMode::RandomGameplay);
+    let allow_grind = mode == GameplayMode::RandomGameplay;
 
     let floor_top_y = floor_top_y.0;
 
@@ -696,7 +786,8 @@ pub(crate) fn spawn_moving_ramps(
     // Use the *largest* possible Z half-extent so we never spawn a ramp that would hang off the floor.
     // Uphill ramps are intentionally longer than downhill ones.
     let max_z_mult = (config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE * UP_RAMP_PHYS_Z_SCALE)
-        .max(config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE);
+        .max(config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE)
+        .max(GRIND_RAMP_LENGTH_SCALE);
     let ramp_half_z = (config.ramp_dimensions_m.z * max_z_mult) * 0.5;
 
     let x_spawn_min = x_min + ramp_half_x;
@@ -771,10 +862,10 @@ pub(crate) fn spawn_moving_ramps(
                 // Build a path-continuous segment in this lane.
                 let (profile, start_y_rel, end_y_rel) = match mode {
                     GameplayMode::RandomGameplay => {
-                        choose_next_lane_segment(&config, &mut state, lane)
+                        choose_next_lane_segment(&config, &mut state, lane, allow_grind)
                     }
                     GameplayMode::ShooterGameplay => {
-                        choose_next_lane_segment(&config, &mut state, lane)
+                        choose_next_lane_segment(&config, &mut state, lane, allow_grind)
                     }
                     GameplayMode::DownhillGameplay => choose_next_lane_segment_downhill(
                         &config,
@@ -838,6 +929,7 @@ pub(crate) fn spawn_moving_ramps(
                     &assets,
                     flat_model.as_deref(),
                     jump_model.as_deref(),
+                    grind_model.as_deref(),
                     slide_model.as_deref(),
                     &config,
                     x,
@@ -854,6 +946,7 @@ pub(crate) fn spawn_moving_ramps(
                         &assets,
                         flat_model.as_deref(),
                         jump_model.as_deref(),
+                        grind_model.as_deref(),
                         slide_model.as_deref(),
                         &config,
                         &mut state,
@@ -917,8 +1010,12 @@ pub(crate) fn spawn_moving_ramps(
         x = x.clamp(x_spawn_min, x_spawn_max);
 
         let (profile, start_y_rel, end_y_rel) = match mode {
-            GameplayMode::RandomGameplay => choose_next_lane_segment(&config, &mut state, lane),
-            GameplayMode::ShooterGameplay => choose_next_lane_segment(&config, &mut state, lane),
+            GameplayMode::RandomGameplay => {
+                choose_next_lane_segment(&config, &mut state, lane, allow_grind)
+            }
+            GameplayMode::ShooterGameplay => {
+                choose_next_lane_segment(&config, &mut state, lane, allow_grind)
+            }
             GameplayMode::DownhillGameplay => choose_next_lane_segment_downhill(
                 &config,
                 &state,
@@ -974,6 +1071,7 @@ pub(crate) fn spawn_moving_ramps(
             &assets,
             flat_model.as_deref(),
             jump_model.as_deref(),
+            grind_model.as_deref(),
             slide_model.as_deref(),
             &config,
             x,
@@ -990,6 +1088,7 @@ pub(crate) fn spawn_moving_ramps(
                 &assets,
                 flat_model.as_deref(),
                 jump_model.as_deref(),
+                grind_model.as_deref(),
                 slide_model.as_deref(),
                 &config,
                 &mut state,
@@ -1178,6 +1277,7 @@ fn choose_next_lane_segment(
     config: &RampSpawnConfig,
     state: &mut RampSpawnState,
     lane: usize,
+    allow_grind: bool,
 ) -> (RampProfile, f32, f32) {
     let prev_anchor_y_rel = state.lane_next_y[lane];
     let last_low_y_rel = state.lane_last_low_y[lane];
@@ -1186,7 +1286,8 @@ fn choose_next_lane_segment(
     let in_low_band = prev_anchor_y_rel <= config.low_band_y_m;
     let in_high_band = prev_anchor_y_rel >= config.high_band_y_m;
 
-    let profile = choose_next_profile(config, state, lane, last, in_low_band, in_high_band);
+    let profile =
+        choose_next_profile(config, state, lane, last, in_low_band, in_high_band, allow_grind);
 
     // The vertical delta depends on the *actual* segment length.
     let base_len_z = config.ramp_dimensions_m.z;
@@ -1195,6 +1296,11 @@ fn choose_next_lane_segment(
     let (profile, mut start_y_rel, mut end_y_rel) = match profile {
         RampProfile::Flat => (RampProfile::Flat, next_anchor_y_rel, next_anchor_y_rel),
         RampProfile::Jump => (RampProfile::Jump, next_anchor_y_rel, next_anchor_y_rel),
+        RampProfile::Grind { slide_angle_deg } => (
+            RampProfile::Grind { slide_angle_deg },
+            next_anchor_y_rel,
+            next_anchor_y_rel,
+        ),
         RampProfile::Wall => (RampProfile::Flat, next_anchor_y_rel, next_anchor_y_rel),
         RampProfile::Inclined { dir, angle_deg } => {
             // IMPORTANT:
@@ -1288,7 +1394,7 @@ fn update_lane_history(state: &mut RampSpawnState, lane: usize, profile: RampPro
         state.lane_down_streak[lane] = state.lane_down_streak[lane].saturating_add(1);
         state.lane_up_streak[lane] = 0;
     } else {
-        // Flat, jump pads, or walls break both streaks.
+        // Flat, grind pads, jump pads, or walls break both streaks.
         state.lane_up_streak[lane] = 0;
         state.lane_down_streak[lane] = 0;
     }
@@ -1427,6 +1533,7 @@ fn choose_next_profile(
     _last: RampProfile,
     _in_low_band: bool,
     _in_high_band: bool,
+    allow_grind: bool,
 ) -> RampProfile {
     // Pick an angle.
     let angle = {
@@ -1442,9 +1549,20 @@ fn choose_next_profile(
     let flat_p = config.flat_probability_mid_band;
 
     let r = rng_f32_01(&mut state.seed);
+    if allow_grind && FORCE_GRIND_ONLY {
+        return RampProfile::Grind {
+            slide_angle_deg: angle,
+        };
+    }
     if r < flat_p {
-        if rng_f32_01(&mut state.seed) < config.jump_probability {
+        let variant_roll = rng_f32_01(&mut state.seed);
+        if variant_roll < config.jump_probability {
             return RampProfile::Jump;
+        }
+        if allow_grind && variant_roll < config.jump_probability + config.grind_probability {
+            return RampProfile::Grind {
+                slide_angle_deg: angle,
+            };
         }
         return RampProfile::Flat;
     }
@@ -1488,6 +1606,7 @@ fn spawn_one_ramp(
     assets: &RampRenderAssets,
     flat_model: Option<&FlatRampModel>,
     jump_model: Option<&JumpRampModel>,
+    grind_model: Option<&GrindRampModel>,
     slide_model: Option<&SlideRampModel>,
     config: &RampSpawnConfig,
     x: f32,
@@ -1518,7 +1637,9 @@ fn spawn_one_ramp(
             1.0,
             1.0,
         ),
-        RampProfile::Flat | RampProfile::Jump | RampProfile::Wall => (1.0, 1.0, 1.0),
+        RampProfile::Flat | RampProfile::Jump | RampProfile::Grind { .. } | RampProfile::Wall => {
+            (1.0, 1.0, 1.0)
+        }
     };
     let phys_z_multiplier = z_multiplier * phys_z_scale;
 
@@ -1536,6 +1657,10 @@ fn spawn_one_ramp(
             config.ramp_dimensions_m.x * 0.5,
             (config.ramp_dimensions_m.z * 0.5) * FLAT_SEGMENT_LENGTH_SCALE,
         ),
+        RampProfile::Grind { .. } => Vec2::new(
+            config.ramp_dimensions_m.x * 0.5 * GRIND_RAMP_WIDTH_SCALE,
+            (config.ramp_dimensions_m.z * 0.5) * GRIND_RAMP_LENGTH_SCALE,
+        ),
         _ => Vec2::new(
             config.ramp_dimensions_m.x * 0.5 * phys_x_scale,
             (config.ramp_dimensions_m.z * 0.5) * phys_z_multiplier,
@@ -1546,7 +1671,7 @@ fn spawn_one_ramp(
     // Because the ramp mesh is a rotated cuboid, its translation.y is NOT the top surface.
     // We adjust the mesh center so that the rendered top surface endpoints match y_start/y_end.
     let center_y = match profile {
-        RampProfile::Flat | RampProfile::Jump => {
+        RampProfile::Flat | RampProfile::Jump | RampProfile::Grind { .. } => {
             // Flat: top surface is simply center + thickness/2
             (y_start + y_end) * 0.5 - thickness * 0.5
         }
@@ -1569,7 +1694,7 @@ fn spawn_one_ramp(
     let mut transform = Transform::from_translation(Vec3::new(x, center_y, z));
 
     match profile {
-        RampProfile::Flat | RampProfile::Jump => {
+        RampProfile::Flat | RampProfile::Jump | RampProfile::Grind { .. } => {
             // No rotation.
         }
         RampProfile::Wall => {
@@ -1633,6 +1758,43 @@ fn spawn_one_ramp(
                                     Quat::IDENTITY,
                                 ),
                                 Transform::from_scale(Vec3::splat(FLAT_RAMP_MODEL_SCALE)),
+                            ));
+                        }
+                    });
+                    used_model = true;
+                }
+            }
+            if !used_model {
+                entity.insert((
+                    Mesh3d(assets.mesh.clone()),
+                    MeshMaterial3d(assets.material.clone()),
+                    RampLodMaterial::new(
+                        assets.material.clone(),
+                        transform.translation,
+                        transform.rotation,
+                    ),
+                ));
+            }
+        }
+        RampProfile::Grind { .. } => {
+            let mut used_model = false;
+            if let Some(model) = grind_model {
+                if model.ready {
+                    entity.with_children(|parent| {
+                        if let Some((mesh, material)) = model.primitives.first() {
+                            parent.spawn((
+                                Mesh3d(mesh.clone()),
+                                MeshMaterial3d(material.clone()),
+                                RampLodMaterial::new(
+                                    material.clone(),
+                                    Vec3::ZERO,
+                                    Quat::IDENTITY,
+                                ),
+                                Transform::from_scale(Vec3::new(
+                                    GRIND_RAMP_WIDTH_SCALE,
+                                    1.0,
+                                    GRIND_RAMP_MODEL_LENGTH_SCALE,
+                                )),
                             ));
                         }
                     });
@@ -1752,6 +1914,7 @@ fn spawn_one_ramp(
         };
         let (overlay_x_scale, overlay_z_scale) = match profile {
             RampProfile::Flat => (1.0, FLAT_SEGMENT_LENGTH_SCALE),
+            RampProfile::Grind { .. } => (GRIND_RAMP_WIDTH_SCALE, GRIND_RAMP_LENGTH_SCALE),
             RampProfile::Inclined {
                 dir: RampSlopeDir::Up,
                 ..
@@ -1838,6 +2001,10 @@ fn enforce_profile_monotonic(profile: RampProfile, start_y_rel: f32, end_y_rel: 
         }
         RampProfile::Flat => (RampProfile::Flat, end_y_rel),
         RampProfile::Jump => (RampProfile::Jump, end_y_rel),
+        RampProfile::Grind { slide_angle_deg } => (
+            RampProfile::Grind { slide_angle_deg },
+            end_y_rel,
+        ),
         RampProfile::Wall => (RampProfile::Wall, end_y_rel),
     }
 }
@@ -1880,6 +2047,7 @@ fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f3
             .min(config.ramp_dimensions_m.z)
             * 0.5,
         RampProfile::Flat => config.ramp_dimensions_m.z * 0.5 * FLAT_SEGMENT_LENGTH_SCALE,
+        RampProfile::Grind { .. } => config.ramp_dimensions_m.z * 0.5 * GRIND_RAMP_LENGTH_SCALE,
         RampProfile::Wall => config.ramp_dimensions_m.y * 0.5,
     }
 }
@@ -1890,6 +2058,7 @@ fn maybe_spawn_wall(
     assets: &RampRenderAssets,
     flat_model: Option<&FlatRampModel>,
     jump_model: Option<&JumpRampModel>,
+    grind_model: Option<&GrindRampModel>,
     slide_model: Option<&SlideRampModel>,
     config: &RampSpawnConfig,
     state: &mut RampSpawnState,
@@ -1923,6 +2092,7 @@ fn maybe_spawn_wall(
         assets,
         flat_model,
         jump_model,
+        grind_model,
         slide_model,
         config,
         x,
