@@ -38,6 +38,8 @@ const RAMP_CURVATURE_MAX_DIST_SCALE: f32 = 0.8;
 const DEBUG_SHOW_SURFACE: bool = true;
 const DEBUG_SURFACE_Y_SCALE: f32 = 0.08;
 const DEBUG_SURFACE_Y_EPS: f32 = 0.01;
+const FLAT_SEGMENT_LENGTH_SCALE: f32 = 0.90;
+const JUMP_DEBUG_Y_OFFSET_SCALE: f32 = 0.50;
 const BASE_INCLINE_LENGTH_SCALE: f32 = 0.70;
 const UP_RAMP_LENGTH_EXTRA_SCALE: f32 = 1.20;
 const UP_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE * UP_RAMP_LENGTH_EXTRA_SCALE;
@@ -1510,6 +1512,10 @@ fn spawn_one_ramp(
             Vec2::splat(radius)
         }
         RampProfile::Wall => Vec2::new(config.ramp_dimensions_m.x * 0.5, thickness * 0.5),
+        RampProfile::Flat => Vec2::new(
+            config.ramp_dimensions_m.x * 0.5,
+            (config.ramp_dimensions_m.z * 0.5) * FLAT_SEGMENT_LENGTH_SCALE,
+        ),
         _ => Vec2::new(
             config.ramp_dimensions_m.x * 0.5,
             (config.ramp_dimensions_m.z * 0.5) * z_multiplier,
@@ -1714,10 +1720,20 @@ fn spawn_one_ramp(
 
     if DEBUG_SHOW_SURFACE && profile != RampProfile::Wall {
         let overlay_half = thickness * 0.5 * DEBUG_SURFACE_Y_SCALE;
-        let overlay_y = thickness * 0.5 + overlay_half + DEBUG_SURFACE_Y_EPS;
+        let jump_overlay_drop = if profile == RampProfile::Jump {
+            thickness * JUMP_DEBUG_Y_OFFSET_SCALE
+        } else {
+            0.0
+        };
+        let overlay_y = thickness * 0.5 + overlay_half + DEBUG_SURFACE_Y_EPS - jump_overlay_drop;
         let overlay_mesh = match profile {
             RampProfile::Jump => assets.jump_mesh.clone(),
             _ => assets.mesh.clone(),
+        };
+        let overlay_z_scale = if profile == RampProfile::Flat {
+            FLAT_SEGMENT_LENGTH_SCALE
+        } else {
+            1.0
         };
         entity.with_children(|parent| {
             parent.spawn((
@@ -1725,7 +1741,7 @@ fn spawn_one_ramp(
                 MeshMaterial3d(assets.debug_surface_material.clone()),
                 Transform {
                     translation: Vec3::new(0.0, overlay_y, 0.0),
-                    scale: Vec3::new(1.0, DEBUG_SURFACE_Y_SCALE, 1.0),
+                    scale: Vec3::new(1.0, DEBUG_SURFACE_Y_SCALE, overlay_z_scale),
                     ..default()
                 },
             ));
@@ -1840,7 +1856,7 @@ fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f3
             .x
             .min(config.ramp_dimensions_m.z)
             * 0.5,
-        RampProfile::Flat => config.ramp_dimensions_m.z * 0.5,
+        RampProfile::Flat => config.ramp_dimensions_m.z * 0.5 * FLAT_SEGMENT_LENGTH_SCALE,
         RampProfile::Wall => config.ramp_dimensions_m.y * 0.5,
     }
 }
