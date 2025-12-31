@@ -40,6 +40,8 @@ const DEBUG_SURFACE_Y_SCALE: f32 = 0.08;
 const DEBUG_SURFACE_Y_EPS: f32 = 0.01;
 const FLAT_SEGMENT_LENGTH_SCALE: f32 = 0.90;
 const JUMP_DEBUG_Y_OFFSET_SCALE: f32 = 0.50;
+const UP_RAMP_PHYS_X_SCALE: f32 = 1.20;
+const UP_RAMP_PHYS_Z_SCALE: f32 = 1.30;
 const BASE_INCLINE_LENGTH_SCALE: f32 = 0.70;
 const UP_RAMP_LENGTH_EXTRA_SCALE: f32 = 1.20;
 const UP_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE * UP_RAMP_LENGTH_EXTRA_SCALE;
@@ -74,6 +76,13 @@ impl RampProfile {
 fn incline_length_scale(dir: RampSlopeDir) -> f32 {
     match dir {
         RampSlopeDir::Up => UP_RAMP_LENGTH_SCALE,
+        RampSlopeDir::Down => DOWN_RAMP_LENGTH_SCALE,
+    }
+}
+
+fn incline_physical_length_scale(dir: RampSlopeDir) -> f32 {
+    match dir {
+        RampSlopeDir::Up => UP_RAMP_LENGTH_SCALE * UP_RAMP_PHYS_Z_SCALE,
         RampSlopeDir::Down => DOWN_RAMP_LENGTH_SCALE,
     }
 }
@@ -686,7 +695,7 @@ pub(crate) fn spawn_moving_ramps(
     let ramp_half_x = config.ramp_dimensions_m.x * 0.5;
     // Use the *largest* possible Z half-extent so we never spawn a ramp that would hang off the floor.
     // Uphill ramps are intentionally longer than downhill ones.
-    let max_z_mult = (config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE)
+    let max_z_mult = (config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE * UP_RAMP_PHYS_Z_SCALE)
         .max(config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE);
     let ramp_half_z = (config.ramp_dimensions_m.z * max_z_mult) * 0.5;
 
@@ -1196,10 +1205,14 @@ fn choose_next_lane_segment(
             // higher than previous ramps.
             let angle_rad = angle_deg.to_radians();
 
-            // UP ramps are 20% longer (10% on each end) to better match their visuals.
+            // Use the visual segment length for height continuity; physics extension is applied elsewhere.
             let len_z = match dir {
-                RampSlopeDir::Up => base_len_z * config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE,
-                RampSlopeDir::Down => base_len_z * config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE,
+                RampSlopeDir::Up => {
+                    base_len_z * config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE
+                }
+                RampSlopeDir::Down => {
+                    base_len_z * config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE
+                }
             };
 
             let rise = angle_rad.sin() * len_z;
@@ -1487,20 +1500,27 @@ fn spawn_one_ramp(
 ) {
     let thickness = config.ramp_dimensions_m.y;
 
-    // Flat uses the base length; inclined is stretched along Z.
-    let z_multiplier = match profile {
-        // Uphill: extended 10% at both ends for better visual alignment.
+    // Flat uses the base length; inclined is stretched along Z for visuals.
+    let (z_multiplier, phys_x_scale, phys_z_scale) = match profile {
         RampProfile::Inclined {
             dir: RampSlopeDir::Up,
             ..
-        } => config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE,
-        // Downhill: keep the shorter length.
+        } => (
+            config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE,
+            UP_RAMP_PHYS_X_SCALE,
+            UP_RAMP_PHYS_Z_SCALE,
+        ),
         RampProfile::Inclined {
             dir: RampSlopeDir::Down,
             ..
-        } => config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE,
-        RampProfile::Flat | RampProfile::Jump | RampProfile::Wall => 1.0,
+        } => (
+            config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE,
+            1.0,
+            1.0,
+        ),
+        RampProfile::Flat | RampProfile::Jump | RampProfile::Wall => (1.0, 1.0, 1.0),
     };
+    let phys_z_multiplier = z_multiplier * phys_z_scale;
 
     let half_extents = match profile {
         RampProfile::Jump => {
@@ -1517,8 +1537,8 @@ fn spawn_one_ramp(
             (config.ramp_dimensions_m.z * 0.5) * FLAT_SEGMENT_LENGTH_SCALE,
         ),
         _ => Vec2::new(
-            config.ramp_dimensions_m.x * 0.5,
-            (config.ramp_dimensions_m.z * 0.5) * z_multiplier,
+            config.ramp_dimensions_m.x * 0.5 * phys_x_scale,
+            (config.ramp_dimensions_m.z * 0.5) * phys_z_multiplier,
         ),
     };
 
@@ -1730,10 +1750,13 @@ fn spawn_one_ramp(
             RampProfile::Jump => assets.jump_mesh.clone(),
             _ => assets.mesh.clone(),
         };
-        let overlay_z_scale = if profile == RampProfile::Flat {
-            FLAT_SEGMENT_LENGTH_SCALE
-        } else {
-            1.0
+        let (overlay_x_scale, overlay_z_scale) = match profile {
+            RampProfile::Flat => (1.0, FLAT_SEGMENT_LENGTH_SCALE),
+            RampProfile::Inclined {
+                dir: RampSlopeDir::Up,
+                ..
+            } => (UP_RAMP_PHYS_X_SCALE, UP_RAMP_PHYS_Z_SCALE),
+            _ => (1.0, 1.0),
         };
         entity.with_children(|parent| {
             parent.spawn((
@@ -1741,7 +1764,7 @@ fn spawn_one_ramp(
                 MeshMaterial3d(assets.debug_surface_material.clone()),
                 Transform {
                     translation: Vec3::new(0.0, overlay_y, 0.0),
-                    scale: Vec3::new(1.0, DEBUG_SURFACE_Y_SCALE, overlay_z_scale),
+                    scale: Vec3::new(overlay_x_scale, DEBUG_SURFACE_Y_SCALE, overlay_z_scale),
                     ..default()
                 },
             ));
@@ -1849,7 +1872,7 @@ fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f3
         RampProfile::Inclined { dir, .. } => {
             (config.ramp_dimensions_m.z * 0.5)
                 * config.inclined_length_multiplier
-                * incline_length_scale(dir)
+                * incline_physical_length_scale(dir)
         }
         RampProfile::Jump => config
             .ramp_dimensions_m
