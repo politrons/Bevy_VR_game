@@ -9,6 +9,12 @@ const PLANET_ROTATION_SPEED_RAD_PER_SEC: f32 = 0.012;
 const PLANET_ROTATION_AXIS: Vec3 = Vec3::Y;
 const SPACE_SKY_MODEL_RADIUS_M: f32 = 1.0;
 const SPACE_SKY_VISUAL_RADIUS_M: f32 = 120.0;
+const SKATEBOARD_MODEL_SCALE: f32 = 0.6666667;
+const SKATEBOARD_PITCH_RAD: f32 = -std::f32::consts::FRAC_PI_2;
+const SKATEBOARD_YAW_RAD: f32 = 0.0;
+const SKATEBOARD_ROLL_RAD: f32 = 17.054326;
+const SKATEBOARD_OFFSET_Y_M: f32 = 0.12;
+const SKATEBOARD_OFFSET_Z_M: f32 = 0.0;
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct PlayerSpawn {
@@ -103,6 +109,20 @@ pub(crate) struct SpaceSkyAssets {
     pub(crate) fallback_material: Handle<StandardMaterial>,
 }
 
+/// Handles for the skateboard visual attached to the player.
+#[derive(Resource, Clone)]
+pub(crate) struct SkateboardAssets {
+    pub(crate) gltf: Handle<Gltf>,
+    pub(crate) fallback_material: Handle<StandardMaterial>,
+}
+
+/// Tracks whether the skateboard has been spawned.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct SkateboardState {
+    pub(crate) spawned: bool,
+    pub(crate) failed: bool,
+}
+
 /// Tracks whether the space sky has been spawned.
 #[derive(Resource, Debug, Default)]
 pub(crate) struct SpaceSkyState {
@@ -113,6 +133,10 @@ pub(crate) struct SpaceSkyState {
 /// Space skybox entity (kept centered on the player).
 #[derive(Component)]
 pub(crate) struct SpaceSky;
+
+/// Skateboard visual attached to the player rig.
+#[derive(Component)]
+pub(crate) struct Skateboard;
 
 /// Creates the initial scene: a large road (playable floor), side/end walls, a textured
 /// debug cube (to validate Android asset loading), and a moving platform the player can ride.
@@ -272,6 +296,24 @@ pub(crate) fn setup_scene(
         fallback_material: sky_fallback_material,
     });
     commands.insert_resource(SpaceSkyState::default());
+
+    let skateboard_fallback_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.25, 0.25, 0.25),
+        ..default()
+    });
+    let skateboard_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/skate.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
+    commands.insert_resource(SkateboardAssets {
+        gltf: skateboard_gltf,
+        fallback_material: skateboard_fallback_material,
+    });
+    commands.insert_resource(SkateboardState::default());
 }
 
 /// Spawns the planet visual once the GLB has loaded, then hides the default floor meshes.
@@ -464,6 +506,109 @@ pub(crate) fn spawn_space_skybox(
         }
         bevy::asset::LoadState::Failed(err) => {
             log::warn!("Space sky model failed to load: {:?}", err);
+            state.failed = true;
+        }
+        _ => {}
+    }
+}
+
+/// Spawns the skateboard visual once the GLB has loaded and the XR rig exists.
+pub(crate) fn spawn_skateboard(
+    assets: Option<Res<SkateboardAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    xr_root: Query<Entity, With<XrTrackingRoot>>,
+    state: Option<ResMut<SkateboardState>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    let (Some(assets), Some(mut state)) = (assets, state) else {
+        return;
+    };
+    if state.spawned || state.failed {
+        return;
+    }
+
+    let Ok(root) = xr_root.single() else {
+        return;
+    };
+
+    let Some(load_state) = asset_server.get_load_state(assets.gltf.id()) else {
+        return;
+    };
+    match load_state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Skateboard model has no meshes.");
+                state.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.fallback_material.clone());
+                    if let Some(mat) = materials.get_mut(&material) {
+                        if mat.base_color_texture.is_none() {
+                            if let Some(emissive_tex) = mat.emissive_texture.clone() {
+                                mat.base_color_texture = Some(emissive_tex);
+                            }
+                        }
+                        mat.base_color = Color::srgb(1.0, 1.0, 1.0);
+                        mat.unlit = true;
+                        mat.double_sided = true;
+                        mat.cull_mode = None;
+                    }
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Skateboard model has no mesh primitives.");
+                state.failed = true;
+                return;
+            }
+
+            let rotation = Quat::from_euler(
+                EulerRot::XYZ,
+                SKATEBOARD_PITCH_RAD,
+                SKATEBOARD_YAW_RAD,
+                SKATEBOARD_ROLL_RAD,
+            );
+            let skateboard = commands
+                .spawn((
+                    Skateboard,
+                    Transform {
+                        translation: Vec3::new(0.0, SKATEBOARD_OFFSET_Y_M, SKATEBOARD_OFFSET_Z_M),
+                        rotation,
+                        scale: Vec3::splat(SKATEBOARD_MODEL_SCALE),
+                        ..default()
+                    },
+                    Name::new("Skateboard"),
+                ))
+                .id();
+            commands.entity(skateboard).with_children(|parent| {
+                for (mesh, material) in &primitives {
+                    parent.spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::default(),
+                    ));
+                }
+            });
+            commands.entity(root).add_child(skateboard);
+            state.spawned = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Skateboard model failed to load: {:?}", err);
             state.failed = true;
         }
         _ => {}

@@ -35,6 +35,7 @@ const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
 const SLIDE_RAMP_MODEL_SCALE: f32 = 2.0;
 const SLIDE_RAMP_MODEL_YAW_RAD: f32 = std::f32::consts::FRAC_PI_2;
 const DOWN_RAMP_SPAWN_PROB: f32 = 0.20;
+const DISABLE_DOWN_RAMPS: bool = true;
 const RAMP_CURVATURE_STRENGTH: f32 = 4.0;
 const RAMP_CURVATURE_MAX_DIST_SCALE: f32 = 0.8;
 const DEBUG_SHOW_SURFACE: bool = true;
@@ -1587,6 +1588,9 @@ fn choose_next_profile(
     } else {
         RampSlopeDir::Down
     };
+    if DISABLE_DOWN_RAMPS {
+        dir = RampSlopeDir::Up;
+    }
     if dir == RampSlopeDir::Down && rng_f32_01(&mut state.seed) > DOWN_RAMP_SPAWN_PROB {
         dir = RampSlopeDir::Up;
     }

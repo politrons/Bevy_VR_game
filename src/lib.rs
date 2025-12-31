@@ -63,8 +63,9 @@ use crate::ramp::{
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
     setup_scene, snap_player_to_floor_once, spawn_planet_floor, spawn_space_skybox,
-    spin_planet_floor, sync_space_sky_position, FloorParams, FloorTopY, PlanetFloorAssets,
-    PlanetFloorState, PlayerSpawn, SpaceSkyAssets, SpaceSkyState,
+    spawn_skateboard, spin_planet_floor, sync_space_sky_position, FloorParams, FloorTopY,
+    PlanetFloorAssets, PlanetFloorState, PlayerSpawn, SkateboardAssets, SkateboardState,
+    SpaceSkyAssets, SpaceSkyState,
 };
 
 #[bevy_main]
@@ -128,6 +129,13 @@ fn main() {
                 .run_if(resource_exists::<SpaceSkyAssets>)
                 .run_if(resource_exists::<SpaceSkyState>)
                 .run_if(resource_exists::<FloorParams>),
+        )
+        .add_systems(
+            Update,
+            spawn_skateboard
+                .run_if(openxr_session_running)
+                .run_if(resource_exists::<SkateboardAssets>)
+                .run_if(resource_exists::<SkateboardState>),
         )
         .add_systems(Update, sync_space_sky_position.run_if(openxr_session_running))
         .add_systems(Update, spin_planet_floor)
