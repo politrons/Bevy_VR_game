@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy_mod_xr::session::XrTrackingRoot;
 
 const PLANET_MODEL_RADIUS_M: f32 = 1.0;
-pub(crate) const PLANET_VISUAL_RADIUS_M: f32 = 83.333336;
+pub(crate) const PLANET_VISUAL_RADIUS_M: f32 = 41.666668;
 const PLANET_ROTATION_SPEED_RAD_PER_SEC: f32 = 0.012;
 const PLANET_ROTATION_AXIS: Vec3 = Vec3::Y;
 const SPACE_SKY_MODEL_RADIUS_M: f32 = 1.0;
@@ -155,8 +155,10 @@ pub(crate) fn setup_scene(
     // Player spawn point: very high above the middle of the floor (free-fall start).
     // Floor is centered at z=0, so "middle of the length" is z=0.
     let spawn_height_above_floor = 80.0_f32;
+    // Spawn towards the ramp despawn direction (+Z) for a clearer planet view.
+    let spawn_z_offset = floor_len * 0.30;
     commands.insert_resource(PlayerSpawn {
-        pos: Vec3::new(0.0, floor_top_y + spawn_height_above_floor, 0.0),
+        pos: Vec3::new(0.0, floor_top_y + spawn_height_above_floor, spawn_z_offset),
         rot: Quat::IDENTITY,
     });
 

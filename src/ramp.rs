@@ -33,8 +33,15 @@ const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
 const SLIDE_RAMP_MODEL_SCALE: f32 = 2.0;
 const SLIDE_RAMP_MODEL_YAW_RAD: f32 = std::f32::consts::FRAC_PI_2;
 const DOWN_RAMP_SPAWN_PROB: f32 = 0.20;
-const RAMP_CURVATURE_STRENGTH: f32 = 2.0;
+const RAMP_CURVATURE_STRENGTH: f32 = 4.0;
 const RAMP_CURVATURE_MAX_DIST_SCALE: f32 = 0.8;
+const DEBUG_SHOW_SURFACE: bool = true;
+const DEBUG_SURFACE_Y_SCALE: f32 = 0.08;
+const DEBUG_SURFACE_Y_EPS: f32 = 0.01;
+const BASE_INCLINE_LENGTH_SCALE: f32 = 0.70;
+const UP_RAMP_LENGTH_EXTRA_SCALE: f32 = 1.20;
+const UP_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE * UP_RAMP_LENGTH_EXTRA_SCALE;
+const DOWN_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE;
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -60,6 +67,17 @@ impl RampProfile {
     fn is_flat_like(self) -> bool {
         matches!(self, RampProfile::Flat | RampProfile::Jump)
     }
+}
+
+fn incline_length_scale(dir: RampSlopeDir) -> f32 {
+    match dir {
+        RampSlopeDir::Up => UP_RAMP_LENGTH_SCALE,
+        RampSlopeDir::Down => DOWN_RAMP_LENGTH_SCALE,
+    }
+}
+
+fn incline_len_z(config: &RampSpawnConfig, dir: RampSlopeDir) -> f32 {
+    config.ramp_dimensions_m.z * config.inclined_length_multiplier * incline_length_scale(dir)
 }
 
 /// Footprint shape for ramp surface checks.
@@ -182,6 +200,7 @@ pub struct RampRenderAssets {
     pub mesh: Handle<Mesh>,
     pub jump_mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
+    pub debug_surface_material: Handle<StandardMaterial>,
     pub flat_gltf: Handle<Gltf>,
     pub jump_gltf: Handle<Gltf>,
     pub slide_gltf: Handle<Gltf>,
@@ -309,7 +328,7 @@ pub struct RampSpawnConfig {
 impl Default for RampSpawnConfig {
     fn default() -> Self {
         Self {
-            lanes: 3, // Three lanes (ramps per row)
+            lanes: 2, // Two lanes (ramps per row)
             lane_spacing_m: 4.0,
             ramp_dimensions_m: Vec3::new(2.0, 0.25, 3.38),
             inclined_length_multiplier: 2.2,
@@ -406,6 +425,14 @@ pub(crate) fn setup_ramp_spawner(
         metallic: 0.0,
         ..default()
     });
+    let debug_surface_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.15, 0.95, 0.35, 0.55),
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    });
     let flat_gltf: Handle<Gltf> = asset_server.load_with_settings(
         "textures/floating.glb",
         |settings: &mut GltfLoaderSettings| {
@@ -435,6 +462,7 @@ pub(crate) fn setup_ramp_spawner(
         mesh: ramp_mesh,
         jump_mesh,
         material: ramp_material,
+        debug_surface_material,
         flat_gltf,
         jump_gltf,
         slide_gltf,
@@ -656,15 +684,18 @@ pub(crate) fn spawn_moving_ramps(
     let ramp_half_x = config.ramp_dimensions_m.x * 0.5;
     // Use the *largest* possible Z half-extent so we never spawn a ramp that would hang off the floor.
     // Uphill ramps are intentionally longer than downhill ones.
-    let max_z_mult =
-        (config.inclined_length_multiplier * 0.70).max(config.inclined_length_multiplier * 0.70);
+    let max_z_mult = (config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE)
+        .max(config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE);
     let ramp_half_z = (config.ramp_dimensions_m.z * max_z_mult) * 0.5;
 
     let x_spawn_min = x_min + ramp_half_x;
     let x_spawn_max = x_max - ramp_half_x;
     let z_spawn_min = z_start - config.spawn_z_extend_m + ramp_half_z;
     let z_spawn_max = z_end - ramp_half_z;
-    let z_despawn_min = z_spawn_min - ramp_half_z - 0.5;
+    let z_spawn_span = (z_spawn_max - z_spawn_min).max(0.0);
+    let z_life_extra = z_spawn_span * 0.30;
+    let z_despawn_min = z_spawn_min - z_life_extra - ramp_half_z - 0.5;
+    let z_despawn_max = z_end + z_life_extra;
 
     // If the floor is too small to fit ramps, do nothing.
     if x_spawn_min >= x_spawn_max || z_spawn_min >= z_spawn_max {
@@ -803,7 +834,7 @@ pub(crate) fn spawn_moving_ramps(
                     floor_top_y + end_y_rel,
                     z,
                     z_despawn_min,
-                    z_end,
+                    z_despawn_max,
                     profile,
                 );
                 if mode == GameplayMode::ShooterGameplay {
@@ -819,7 +850,7 @@ pub(crate) fn spawn_moving_ramps(
                         x,
                         z,
                         z_despawn_min,
-                        z_end,
+                        z_despawn_max,
                         profile,
                         end_y_rel,
                     );
@@ -939,7 +970,7 @@ pub(crate) fn spawn_moving_ramps(
             floor_top_y + end_y_rel,
             z,
             z_despawn_min,
-            z_end,
+            z_despawn_max,
             profile,
         );
         if mode == GameplayMode::ShooterGameplay {
@@ -955,7 +986,7 @@ pub(crate) fn spawn_moving_ramps(
                 x,
                 z,
                 z_despawn_min,
-                z_end,
+                z_despawn_max,
                 profile,
                 end_y_rel,
             );
@@ -1030,6 +1061,7 @@ pub(crate) fn update_ramp_lod(
     config: Res<RampSpawnConfig>,
     mut lod_cache: ResMut<RampLodMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    parents: Query<&GlobalTransform>,
     mut ramps: Query<(
         &GlobalTransform,
         &mut Transform,
@@ -1050,7 +1082,8 @@ pub(crate) fn update_ramp_lod(
                            global: &GlobalTransform,
                            local: &mut Transform,
                            lod: &RampLodMaterial,
-                           curvature_t: f32| {
+                           curvature_t: f32,
+                           parent_rot: Option<Quat>| {
         let radius = PLANET_VISUAL_RADIUS_M.max(0.1);
         let dx = global.translation().x - floor.center.x;
         let dz_center = global.translation().z - floor.center.z;
@@ -1059,7 +1092,11 @@ pub(crate) fn update_ramp_lod(
         let dist_sq = (dx * dx + dz_center * dz_center).min(max_sq);
         let drop = radius - (radius * radius - dist_sq).sqrt();
         let offset_y = -(drop * RAMP_CURVATURE_STRENGTH) * curvature_t;
-        local.translation = lod.base_translation + Vec3::new(0.0, offset_y, 0.0);
+        let world_offset = Vec3::new(0.0, offset_y, 0.0);
+        let local_offset = parent_rot
+            .map(|rot| rot.inverse().mul_vec3(world_offset))
+            .unwrap_or(world_offset);
+        local.translation = lod.base_translation + local_offset;
         local.rotation = lod.base_rotation;
     };
 
@@ -1067,10 +1104,13 @@ pub(crate) fn update_ramp_lod(
         let dz = (global.translation().z - player_z).abs();
         let wants_unlit = dz >= cutoff;
         let curvature_t = ((dz - cutoff) / blend).clamp(0.0, 1.0);
+        let parent_rot = parent
+            .and_then(|rel| parents.get(rel.parent()).ok())
+            .map(|gt| gt.compute_transform().rotation);
         if wants_unlit == lod.is_unlit {
             // Still update curvature for distant visuals.
             if let (Some(_parent), Some(floor)) = (parent, floor) {
-                apply_curvature(floor, global, &mut local, &lod, curvature_t);
+                apply_curvature(floor, global, &mut local, &lod, curvature_t, parent_rot);
             } else if parent.is_some() {
                 local.translation = lod.base_translation;
                 local.rotation = lod.base_rotation;
@@ -1090,7 +1130,7 @@ pub(crate) fn update_ramp_lod(
         }
 
         if let (Some(_parent), Some(floor)) = (parent, floor) {
-            apply_curvature(floor, global, &mut local, &lod, curvature_t);
+            apply_curvature(floor, global, &mut local, &lod, curvature_t, parent_rot);
         } else if parent.is_some() {
             local.translation = lod.base_translation;
             local.rotation = lod.base_rotation;
@@ -1154,11 +1194,10 @@ fn choose_next_lane_segment(
             // higher than previous ramps.
             let angle_rad = angle_deg.to_radians();
 
-            // Reduce UP ramp length by 30% (makes climbs less "long/rectangular").
-            // Downhill ramps are intentionally shorter (x0.70) to make drops snappier.
+            // UP ramps are 20% longer (10% on each end) to better match their visuals.
             let len_z = match dir {
-                RampSlopeDir::Up => base_len_z * config.inclined_length_multiplier * 0.70,
-                RampSlopeDir::Down => base_len_z * config.inclined_length_multiplier * 0.70,
+                RampSlopeDir::Up => base_len_z * config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE,
+                RampSlopeDir::Down => base_len_z * config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE,
             };
 
             let rise = angle_rad.sin() * len_z;
@@ -1301,7 +1340,7 @@ fn select_downhill_angle_deg(config: &RampSpawnConfig, state: &RampSpawnState) -
         return None;
     }
 
-    let len_z = config.ramp_dimensions_m.z * config.inclined_length_multiplier * 0.70;
+    let len_z = incline_len_z(config, RampSlopeDir::Up);
     let mut best_angle = None;
     let mut best_rise = 0.0;
     for angle_deg in config.allowed_incline_angles_deg {
@@ -1349,7 +1388,7 @@ fn choose_next_lane_segment_downhill(
                 let min_y = config.min_height_above_floor_m;
                 return (RampProfile::Flat, min_y, min_y);
             };
-            let len_z = config.ramp_dimensions_m.z * config.inclined_length_multiplier * 0.70;
+            let len_z = incline_len_z(config, RampSlopeDir::Up);
             let rise = angle_deg.to_radians().sin() * len_z;
             let end_y_rel = prev_anchor_y_rel;
             let start_y_rel = prev_anchor_y_rel - rise;
@@ -1448,16 +1487,16 @@ fn spawn_one_ramp(
 
     // Flat uses the base length; inclined is stretched along Z.
     let z_multiplier = match profile {
-        // Uphill: 30% shorter
+        // Uphill: extended 10% at both ends for better visual alignment.
         RampProfile::Inclined {
             dir: RampSlopeDir::Up,
             ..
-        } => config.inclined_length_multiplier * 0.70,
-        // Downhill: 30% shorter
+        } => config.inclined_length_multiplier * UP_RAMP_LENGTH_SCALE,
+        // Downhill: keep the shorter length.
         RampProfile::Inclined {
             dir: RampSlopeDir::Down,
             ..
-        } => config.inclined_length_multiplier * 0.70,
+        } => config.inclined_length_multiplier * DOWN_RAMP_LENGTH_SCALE,
         RampProfile::Flat | RampProfile::Jump | RampProfile::Wall => 1.0,
     };
 
@@ -1672,6 +1711,26 @@ fn spawn_one_ramp(
             ));
         }
     }
+
+    if DEBUG_SHOW_SURFACE && profile != RampProfile::Wall {
+        let overlay_half = thickness * 0.5 * DEBUG_SURFACE_Y_SCALE;
+        let overlay_y = thickness * 0.5 + overlay_half + DEBUG_SURFACE_Y_EPS;
+        let overlay_mesh = match profile {
+            RampProfile::Jump => assets.jump_mesh.clone(),
+            _ => assets.mesh.clone(),
+        };
+        entity.with_children(|parent| {
+            parent.spawn((
+                Mesh3d(overlay_mesh),
+                MeshMaterial3d(assets.debug_surface_material.clone()),
+                Transform {
+                    translation: Vec3::new(0.0, overlay_y, 0.0),
+                    scale: Vec3::new(1.0, DEBUG_SURFACE_Y_SCALE, 1.0),
+                    ..default()
+                },
+            ));
+        });
+    }
 }
 
 /// Clamp the end height to a neighbor lane so lateral moves stay reasonable.
@@ -1771,8 +1830,10 @@ fn lane_safe_x_jitter_m(config: &RampSpawnConfig) -> f32 {
 /// Returns the half Z-extent for a ramp profile (used for spacing).
 fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f32 {
     match profile {
-        RampProfile::Inclined { .. } => {
-            (config.ramp_dimensions_m.z * 0.5) * config.inclined_length_multiplier * 0.70
+        RampProfile::Inclined { dir, .. } => {
+            (config.ramp_dimensions_m.z * 0.5)
+                * config.inclined_length_multiplier
+                * incline_length_scale(dir)
         }
         RampProfile::Jump => config
             .ramp_dimensions_m

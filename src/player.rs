@@ -120,7 +120,7 @@ impl Default for PlayerSettings {
             turn_speed_rad_s: 120.0_f32.to_radians(),
             stick_deadzone: 0.15,
             // Higher jump so vertical steps feel fair.
-            jump_velocity_mps: 6.6308,
+            jump_velocity_mps: 7.95696,
             gravity_mps2: -9.81,
         }
     }
