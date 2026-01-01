@@ -25,11 +25,13 @@ pub struct Bullet {
     pub remaining_m: f32,
 }
 
-const BULLET_RADIUS_M: f32 = 0.035;
+const BULLET_RADIUS_M: f32 = 0.0245;
+const BULLET_LENGTH_M: f32 = 0.14;
 const BULLET_SPEED_MPS: f32 = 18.0;
 const BULLET_MAX_DISTANCE_M: f32 = 40.0;
 const BULLET_SPAWN_OFFSET_M: f32 = 0.12;
-const BULLET_PITCH_DOWN_DEG: f32 = 12.0;
+const BULLET_PITCH_DOWN_DEG: f32 = 32.0;
+const BULLET_YAW_LEFT_DEG: f32 = 35.0;
 const TRIGGER_FIRE_THRESHOLD: f32 = 0.6;
 
 /// Creates the shared bullet mesh/material.
@@ -38,7 +40,7 @@ pub(crate) fn setup_bullet_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let mesh = meshes.add(Sphere::new(BULLET_RADIUS_M));
+    let mesh = meshes.add(Capsule3d::new(BULLET_RADIUS_M, BULLET_LENGTH_M));
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.95, 0.10, 0.10),
         emissive: Color::srgb(0.35, 0.05, 0.05).into(),
@@ -86,11 +88,14 @@ pub(crate) fn spawn_bullets(
         return;
     }
     let right_axis = (right_t.rotation * Vec3::X).normalize_or_zero();
+    let up_axis = (right_t.rotation * Vec3::Y).normalize_or_zero();
+    let yaw = Quat::from_axis_angle(up_axis, BULLET_YAW_LEFT_DEG.to_radians());
     let pitch = Quat::from_axis_angle(right_axis, -BULLET_PITCH_DOWN_DEG.to_radians());
-    let dir = (pitch * forward).normalize_or_zero();
+    let dir = (pitch * yaw * forward).normalize_or_zero();
 
     let spawn_pos = right_t.translation + dir * BULLET_SPAWN_OFFSET_M;
 
+    let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
     commands.spawn((
         Bullet {
             velocity: dir * BULLET_SPEED_MPS,
@@ -98,7 +103,11 @@ pub(crate) fn spawn_bullets(
         },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
-        Transform::from_translation(spawn_pos),
+        Transform {
+            translation: spawn_pos,
+            rotation,
+            ..default()
+        },
         Name::new("Bullet"),
     ));
 }

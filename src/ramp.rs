@@ -68,6 +68,12 @@ pub struct MonsterSceneAnimation {
     pub repeat: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MonsterSpawnSurface {
+    Flat,
+    Up,
+}
+
 const FLAT_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
@@ -93,6 +99,7 @@ const UP_RAMP_LENGTH_EXTRA_SCALE: f32 = 1.56;
 const UP_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE * UP_RAMP_LENGTH_EXTRA_SCALE;
 const DOWN_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE;
 const MONSTER_SPAWN_PROB: f32 = 0.30;
+const DOWNHILL_UP_MONSTER_PROB: f32 = 0.10;
 const MONSTER_DEAD_DESPAWN_S: f32 = 3.0;
 const MONSTER_MODEL_SCALE: f32 = 1.0;
 const MONSTER_OFFSET_Y_M: f32 = 0.0;
@@ -405,7 +412,7 @@ pub struct RampSpawnConfig {
     pub jump_probability: f32,
     /// Chance for a flat segment to become a grind ramp (RandomGameplay only).
     pub grind_probability: f32,
-    /// Chance to spawn a monster on a flat ramp (ShooterGameplay only).
+    /// Chance to spawn a monster on a flat ramp (Shooter/Random gameplay).
     pub monster_spawn_probability: f32,
 
     /// Y band (relative to floor top): below this we allow long UP streaks.
@@ -1140,6 +1147,20 @@ pub(crate) fn spawn_moving_ramps(
                         &mut state,
                         ramp_entity,
                         profile,
+                        MonsterSpawnSurface::Flat,
+                        config.monster_spawn_probability,
+                    );
+                } else if mode == GameplayMode::DownhillGameplay {
+                    maybe_spawn_monster(
+                        &mut commands,
+                        monster_attack.as_deref(),
+                        monster_dead.as_deref(),
+                        &config,
+                        &mut state,
+                        ramp_entity,
+                        profile,
+                        MonsterSpawnSurface::Up,
+                        DOWNHILL_UP_MONSTER_PROB,
                     );
                 }
 
@@ -1274,6 +1295,20 @@ pub(crate) fn spawn_moving_ramps(
                 &mut state,
                 ramp_entity,
                 profile,
+                MonsterSpawnSurface::Flat,
+                config.monster_spawn_probability,
+            );
+        } else if mode == GameplayMode::DownhillGameplay {
+            maybe_spawn_monster(
+                &mut commands,
+                monster_attack.as_deref(),
+                monster_dead.as_deref(),
+                &config,
+                &mut state,
+                ramp_entity,
+                profile,
+                MonsterSpawnSurface::Up,
+                DOWNHILL_UP_MONSTER_PROB,
             );
         }
 
@@ -2341,7 +2376,7 @@ fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f3
     }
 }
 
-/// Spawns a monster on top of a flat ramp in ShooterGameplay.
+/// Spawns a monster on selected ramp surfaces.
 fn maybe_spawn_monster(
     commands: &mut Commands,
     attack_model: Option<&MonsterAttackModel>,
@@ -2350,11 +2385,17 @@ fn maybe_spawn_monster(
     state: &mut RampSpawnState,
     ramp_entity: Entity,
     profile: RampProfile,
+    spawn_surface: MonsterSpawnSurface,
+    spawn_probability: f32,
 ) {
-    if profile != RampProfile::Flat {
+    let surface_ok = match spawn_surface {
+        MonsterSpawnSurface::Flat => profile == RampProfile::Flat,
+        MonsterSpawnSurface::Up => profile.is_up(),
+    };
+    if !surface_ok {
         return;
     }
-    if rng_f32_01(&mut state.seed) >= config.monster_spawn_probability {
+    if rng_f32_01(&mut state.seed) >= spawn_probability {
         return;
     }
     let (Some(attack_model), Some(dead_model)) = (attack_model, dead_model) else {
