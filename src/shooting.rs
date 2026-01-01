@@ -29,7 +29,7 @@ const BULLET_RADIUS_M: f32 = 0.0245;
 const BULLET_LENGTH_M: f32 = 0.14;
 const BULLET_SPEED_MPS: f32 = 18.0;
 const BULLET_MAX_DISTANCE_M: f32 = 40.0;
-const BULLET_SPAWN_OFFSET_M: f32 = 0.12;
+const BULLET_SPAWN_OFFSET_M: f32 = 0.20;
 const BULLET_PITCH_DOWN_DEG: f32 = 32.0;
 const BULLET_YAW_LEFT_DEG: f32 = 35.0;
 const TRIGGER_FIRE_THRESHOLD: f32 = 0.6;
@@ -93,7 +93,7 @@ pub(crate) fn spawn_bullets(
     let pitch = Quat::from_axis_angle(right_axis, -BULLET_PITCH_DOWN_DEG.to_radians());
     let dir = (pitch * yaw * forward).normalize_or_zero();
 
-    let spawn_pos = right_t.translation + dir * BULLET_SPAWN_OFFSET_M;
+    let spawn_pos = right_t.translation + dir * (BULLET_SPAWN_OFFSET_M + BULLET_LENGTH_M * 0.5);
 
     let rotation = Quat::from_rotation_arc(Vec3::Y, dir);
     commands.spawn((
