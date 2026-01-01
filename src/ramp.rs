@@ -1,7 +1,12 @@
+use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
+use bevy::animation::transition::AnimationTransitions;
+use bevy::animation::AnimationPlayer;
+use bevy::gltf::{Gltf, GltfLoaderSettings, GltfMesh};
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
-use bevy::gltf::{Gltf, GltfLoaderSettings, GltfMesh};
+use bevy::scene::SceneRoot;
 use std::collections::HashMap;
+use std::time::Duration;
 use bevy_mod_xr::session::XrTrackingRoot;
 
 use crate::gameplay::{DownhillPhase, GameplayMode, GameplayState};
@@ -29,6 +34,40 @@ pub enum RampProfile {
     Inclined { dir: RampSlopeDir, angle_deg: f32 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonsterMode {
+    Attack,
+    Dead,
+}
+
+#[derive(Component, Debug)]
+pub struct Monster;
+
+#[derive(Component, Debug)]
+pub struct MonsterState {
+    pub mode: MonsterMode,
+    pub despawn_timer: Timer,
+    pub just_switched: bool,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MonsterHitbox {
+    pub half_extents: Vec3,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonsterSceneRoot {
+    pub mode: MonsterMode,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MonsterSceneAnimation {
+    pub monster: Entity,
+    pub mode: MonsterMode,
+    pub node: AnimationNodeIndex,
+    pub repeat: bool,
+}
+
 const FLAT_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_SCALE: f32 = 1.0;
 const JUMP_RAMP_MODEL_YAW_RAD: f32 = 0.0;
@@ -53,6 +92,11 @@ const BASE_INCLINE_LENGTH_SCALE: f32 = 0.70;
 const UP_RAMP_LENGTH_EXTRA_SCALE: f32 = 1.56;
 const UP_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE * UP_RAMP_LENGTH_EXTRA_SCALE;
 const DOWN_RAMP_LENGTH_SCALE: f32 = BASE_INCLINE_LENGTH_SCALE;
+const MONSTER_SPAWN_PROB: f32 = 0.30;
+const MONSTER_DEAD_DESPAWN_S: f32 = 3.0;
+const MONSTER_MODEL_SCALE: f32 = 1.0;
+const MONSTER_OFFSET_Y_M: f32 = 0.0;
+const MONSTER_HITBOX_HALF_EXTENTS: Vec3 = Vec3::new(0.45, 0.9, 0.45);
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -229,6 +273,12 @@ pub struct RampRenderAssets {
     pub grind_gltf: Handle<Gltf>,
 }
 
+#[derive(Resource, Clone)]
+pub struct MonsterRenderAssets {
+    pub attack_gltf: Handle<Gltf>,
+    pub dead_gltf: Handle<Gltf>,
+}
+
 #[derive(Resource, Default)]
 pub struct RampLodMaterials {
     unlit_by_lit: HashMap<Handle<StandardMaterial>, Handle<StandardMaterial>>,
@@ -279,6 +329,24 @@ pub struct SlideRampModel {
     pub ready: bool,
     pub failed: bool,
     pub primitives: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+}
+
+#[derive(Resource, Default)]
+pub struct MonsterAttackModel {
+    pub ready: bool,
+    pub failed: bool,
+    pub scene: Option<Handle<Scene>>,
+    pub graph: Option<Handle<AnimationGraph>>,
+    pub node: Option<AnimationNodeIndex>,
+}
+
+#[derive(Resource, Default)]
+pub struct MonsterDeadModel {
+    pub ready: bool,
+    pub failed: bool,
+    pub scene: Option<Handle<Scene>>,
+    pub graph: Option<Handle<AnimationGraph>>,
+    pub node: Option<AnimationNodeIndex>,
 }
 
 /// Configuration for ramp spawning.
@@ -337,10 +405,8 @@ pub struct RampSpawnConfig {
     pub jump_probability: f32,
     /// Chance for a flat segment to become a grind ramp (RandomGameplay only).
     pub grind_probability: f32,
-    /// Chance to spawn a wall after a lane (ShooterGameplay only).
-    pub wall_spawn_probability: f32,
-    /// Gap in meters between a spawned ramp and its wall.
-    pub wall_gap_m: f32,
+    /// Chance to spawn a monster on a flat ramp (ShooterGameplay only).
+    pub monster_spawn_probability: f32,
 
     /// Y band (relative to floor top): below this we allow long UP streaks.
     pub low_band_y_m: f32,
@@ -378,8 +444,7 @@ impl Default for RampSpawnConfig {
             flat_probability_mid_band: 0.50,
             jump_probability: 0.15,
             grind_probability: 0.10,
-            wall_spawn_probability: 0.30,
-            wall_gap_m: 0.2,
+            monster_spawn_probability: MONSTER_SPAWN_PROB,
             low_band_y_m: 3.0,
             high_band_y_m: 16.0,
             allowed_incline_angles_deg: [20.0, 30.0],
@@ -498,6 +563,22 @@ pub(crate) fn setup_ramp_spawner(
             settings.load_animations = false;
         },
     );
+    let monster_attack_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "animations/monster_1_attack.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = true;
+        },
+    );
+    let monster_dead_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "animations/monster_1_dead.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = true;
+        },
+    );
 
     commands.insert_resource(RampRenderAssets {
         mesh: ramp_mesh,
@@ -509,10 +590,16 @@ pub(crate) fn setup_ramp_spawner(
         slide_gltf,
         grind_gltf,
     });
+    commands.insert_resource(MonsterRenderAssets {
+        attack_gltf: monster_attack_gltf,
+        dead_gltf: monster_dead_gltf,
+    });
     commands.insert_resource(FlatRampModel::default());
     commands.insert_resource(JumpRampModel::default());
     commands.insert_resource(GrindRampModel::default());
     commands.insert_resource(SlideRampModel::default());
+    commands.insert_resource(MonsterAttackModel::default());
+    commands.insert_resource(MonsterDeadModel::default());
     commands.insert_resource(RampLodMaterials::default());
     commands.insert_resource(config);
     commands.insert_resource(RampSpawnState::default());
@@ -746,6 +833,102 @@ pub(crate) fn prepare_slide_ramp_model(
     }
 }
 
+/// Caches the monster attack GLB mesh primitives once the asset is loaded.
+pub(crate) fn prepare_monster_attack_model(
+    assets: Option<Res<MonsterRenderAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    model: Option<ResMut<MonsterAttackModel>>,
+) {
+    let (Some(assets), Some(mut model)) = (assets, model) else {
+        return;
+    };
+    if model.ready || model.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.attack_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.attack_gltf) else {
+                return;
+            };
+            let scene = gltf
+                .default_scene
+                .clone()
+                .or_else(|| gltf.scenes.first().cloned());
+            if scene.is_none() {
+                log::warn!("Monster attack model has no scene.");
+                model.failed = true;
+                return;
+            }
+            model.scene = scene;
+            if let Some(clip) = gltf.animations.first() {
+                let (graph, node) = AnimationGraph::from_clip(clip.clone());
+                model.graph = Some(graphs.add(graph));
+                model.node = Some(node);
+            }
+            model.ready = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Monster attack model failed to load: {:?}", err);
+            model.failed = true;
+        }
+        _ => {}
+    }
+}
+
+/// Caches the monster dead GLB mesh primitives once the asset is loaded.
+pub(crate) fn prepare_monster_dead_model(
+    assets: Option<Res<MonsterRenderAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    model: Option<ResMut<MonsterDeadModel>>,
+) {
+    let (Some(assets), Some(mut model)) = (assets, model) else {
+        return;
+    };
+    if model.ready || model.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.dead_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.dead_gltf) else {
+                return;
+            };
+            let scene = gltf
+                .default_scene
+                .clone()
+                .or_else(|| gltf.scenes.first().cloned());
+            if scene.is_none() {
+                log::warn!("Monster dead model has no scene.");
+                model.failed = true;
+                return;
+            }
+            model.scene = scene;
+            if let Some(clip) = gltf.animations.first() {
+                let (graph, node) = AnimationGraph::from_clip(clip.clone());
+                model.graph = Some(graphs.add(graph));
+                model.node = Some(node);
+            }
+            model.ready = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Monster dead model failed to load: {:?}", err);
+            model.failed = true;
+        }
+        _ => {}
+    }
+}
+
 /// Spawn ramps continuously.
 ///
 /// Ramps spawn fully inside a window that extends behind the floor for distant visuals.
@@ -765,6 +948,8 @@ pub(crate) fn spawn_moving_ramps(
     jump_model: Option<Res<JumpRampModel>>,
     grind_model: Option<Res<GrindRampModel>>,
     slide_model: Option<Res<SlideRampModel>>,
+    monster_attack: Option<Res<MonsterAttackModel>>,
+    monster_dead: Option<Res<MonsterDeadModel>>,
     gameplay: Option<ResMut<GameplayState>>,
 ) {
     let mut gameplay = gameplay;
@@ -822,16 +1007,21 @@ pub(crate) fn spawn_moving_ramps(
     if !state.initialized {
         state.initialized = true;
 
-        let prefill_count = if config.z_spacing_m > f32::EPSILON {
+        let spacing = if config.spawn_interval_s > f32::EPSILON && config.ramp_speed_z_mps > 0.0 {
+            config.spawn_interval_s * config.ramp_speed_z_mps
+        } else {
+            config.z_spacing_m
+        };
+        let prefill_count = if spacing > f32::EPSILON {
             let span = (z_spawn_max - z_spawn_min).max(0.0);
-            let needed = (span / config.z_spacing_m).ceil() as usize + 1;
+            let needed = (span / spacing).ceil() as usize + 1;
             config.initial_ramps_per_lane.max(needed)
         } else {
             config.initial_ramps_per_lane
         };
 
         for i in 0..prefill_count {
-            let z_base = z_spawn_min + (i as f32) * config.z_spacing_m;
+            let z_base = z_spawn_min + (i as f32) * spacing;
             if z_base > z_spawn_max {
                 break;
             }
@@ -925,7 +1115,7 @@ pub(crate) fn spawn_moving_ramps(
                     continue;
                 }
 
-                spawn_one_ramp(
+                let ramp_entity = spawn_one_ramp(
                     &mut commands,
                     &assets,
                     flat_model.as_deref(),
@@ -941,23 +1131,15 @@ pub(crate) fn spawn_moving_ramps(
                     z_despawn_max,
                     profile,
                 );
-                if mode == GameplayMode::ShooterGameplay {
-                    maybe_spawn_wall(
+                if matches!(mode, GameplayMode::ShooterGameplay | GameplayMode::RandomGameplay) {
+                    maybe_spawn_monster(
                         &mut commands,
-                        &assets,
-                        flat_model.as_deref(),
-                        jump_model.as_deref(),
-                        grind_model.as_deref(),
-                        slide_model.as_deref(),
+                        monster_attack.as_deref(),
+                        monster_dead.as_deref(),
                         &config,
                         &mut state,
-                        floor_top_y,
-                        x,
-                        z,
-                        z_despawn_min,
-                        z_despawn_max,
+                        ramp_entity,
                         profile,
-                        end_y_rel,
                     );
                 }
 
@@ -1067,7 +1249,7 @@ pub(crate) fn spawn_moving_ramps(
             continue;
         }
 
-        spawn_one_ramp(
+        let ramp_entity = spawn_one_ramp(
             &mut commands,
             &assets,
             flat_model.as_deref(),
@@ -1083,23 +1265,15 @@ pub(crate) fn spawn_moving_ramps(
             z_despawn_max,
             profile,
         );
-        if mode == GameplayMode::ShooterGameplay {
-            maybe_spawn_wall(
+        if matches!(mode, GameplayMode::ShooterGameplay | GameplayMode::RandomGameplay) {
+            maybe_spawn_monster(
                 &mut commands,
-                &assets,
-                flat_model.as_deref(),
-                jump_model.as_deref(),
-                grind_model.as_deref(),
-                slide_model.as_deref(),
+                monster_attack.as_deref(),
+                monster_dead.as_deref(),
                 &config,
                 &mut state,
-                floor_top_y,
-                x,
-                z,
-                z_despawn_min,
-                z_despawn_max,
+                ramp_entity,
                 profile,
-                end_y_rel,
             );
         }
 
@@ -1162,6 +1336,114 @@ pub(crate) fn move_ramps(
         if t.translation.z > r.z_max || t.translation.z < r.z_min {
             commands.entity(e).despawn();
         }
+    }
+}
+
+/// Updates monster visuals and despawns dead monsters after a short delay.
+pub(crate) fn update_monsters(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut monsters: Query<(Entity, &mut MonsterState, Option<&Children>)>,
+    mut scenes: Query<(&mut Visibility, &MonsterSceneRoot)>,
+    mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions, &MonsterSceneAnimation)>,
+) {
+    for (entity, mut state, children) in &mut monsters {
+        if state.mode == MonsterMode::Dead {
+            state.despawn_timer.tick(time.delta());
+            if state.despawn_timer.is_finished() {
+                if let Some(children) = children {
+                    for child in children.iter() {
+                        commands.entity(child).despawn();
+                    }
+                }
+                commands.entity(entity).despawn();
+                continue;
+            }
+        }
+
+        if let Some(children) = children {
+            for child in children.iter() {
+                if let Ok((mut visibility, scene)) = scenes.get_mut(child) {
+                    *visibility = if scene.mode == state.mode {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    };
+                }
+            }
+        }
+
+        if state.just_switched {
+            for (mut player, mut transitions, anim) in &mut players {
+                if anim.monster != entity {
+                    continue;
+                }
+                if anim.mode == state.mode {
+                    player.stop_all();
+                    let active = transitions.play(&mut player, anim.node, Duration::ZERO);
+                    if anim.repeat {
+                        active.repeat();
+                    }
+                } else {
+                    player.stop_all();
+                }
+            }
+            state.just_switched = false;
+        }
+    }
+}
+
+/// Registers animation graphs for monster scenes once their AnimationPlayers appear.
+pub(crate) fn register_monster_animation_players(
+    mut commands: Commands,
+    attack: Option<Res<MonsterAttackModel>>,
+    dead: Option<Res<MonsterDeadModel>>,
+    parents: Query<&ChildOf>,
+    scenes: Query<&MonsterSceneRoot>,
+    monsters: Query<&MonsterState>,
+    mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+) {
+    let (Some(attack), Some(dead)) = (attack, dead) else {
+        return;
+    };
+
+    for (entity, mut player) in &mut players {
+        let Some(scene_mode) = find_monster_scene_mode(entity, &parents, &scenes) else {
+            continue;
+        };
+        let Some(monster_entity) = find_monster_entity(entity, &parents, &monsters) else {
+            continue;
+        };
+
+        let (graph, node, repeat) = match scene_mode {
+            MonsterMode::Attack => (attack.graph.as_ref(), attack.node, true),
+            MonsterMode::Dead => (dead.graph.as_ref(), dead.node, false),
+        };
+        let (Some(graph), Some(node)) = (graph, node) else {
+            continue;
+        };
+
+        let mut transitions = AnimationTransitions::new();
+        player.stop_all();
+        if let Ok(state) = monsters.get(monster_entity) {
+            if state.mode == scene_mode {
+                let active = transitions.play(&mut player, node, Duration::ZERO);
+                if repeat {
+                    active.repeat();
+                }
+            }
+        }
+
+        commands.entity(entity).insert((
+            AnimationGraphHandle(graph.clone()),
+            transitions,
+            MonsterSceneAnimation {
+                monster: monster_entity,
+                mode: scene_mode,
+                node,
+                repeat,
+            },
+        ));
     }
 }
 
@@ -1620,7 +1902,7 @@ fn spawn_one_ramp(
     z_min: f32,
     z_max: f32,
     profile: RampProfile,
-) {
+) -> Entity {
     let thickness = config.ramp_dimensions_m.y;
 
     // Flat uses the base length; inclined is stretched along Z for visuals.
@@ -1745,6 +2027,7 @@ fn spawn_one_ramp(
             segment_y_end: y_end,
         },
     ));
+    let entity_id = entity.id();
 
     match profile {
         RampProfile::Flat => {
@@ -1937,6 +2220,8 @@ fn spawn_one_ramp(
             ));
         });
     }
+
+    entity_id
 }
 
 /// Clamp the end height to a neighbor lane so lateral moves stay reasonable.
@@ -2056,57 +2341,83 @@ fn ramp_half_z_for_profile(config: &RampSpawnConfig, profile: RampProfile) -> f3
     }
 }
 
-/// Spawns a vertical wall obstacle just ahead of the current lane ramp.
-fn maybe_spawn_wall(
+/// Spawns a monster on top of a flat ramp in ShooterGameplay.
+fn maybe_spawn_monster(
     commands: &mut Commands,
-    assets: &RampRenderAssets,
-    flat_model: Option<&FlatRampModel>,
-    jump_model: Option<&JumpRampModel>,
-    grind_model: Option<&GrindRampModel>,
-    slide_model: Option<&SlideRampModel>,
+    attack_model: Option<&MonsterAttackModel>,
+    dead_model: Option<&MonsterDeadModel>,
     config: &RampSpawnConfig,
     state: &mut RampSpawnState,
-    floor_top_y: f32,
-    x: f32,
-    z: f32,
-    z_min: f32,
-    z_max: f32,
+    ramp_entity: Entity,
     profile: RampProfile,
-    end_y_rel: f32,
 ) {
-    if rng_f32_01(&mut state.seed) >= config.wall_spawn_probability {
+    if profile != RampProfile::Flat {
+        return;
+    }
+    if rng_f32_01(&mut state.seed) >= config.monster_spawn_probability {
+        return;
+    }
+    let (Some(attack_model), Some(dead_model)) = (attack_model, dead_model) else {
+        return;
+    };
+    if !attack_model.ready || !dead_model.ready {
         return;
     }
 
-    let ramp_half_z = ramp_half_z_for_profile(config, profile);
-    let wall_half_z = config.ramp_dimensions_m.y * 0.5;
-    let wall_z = z + ramp_half_z + wall_half_z + config.wall_gap_m;
-
-    let wall_z_min = z_min + wall_half_z;
-    let wall_z_max = z_max - wall_half_z;
-    if wall_z < wall_z_min || wall_z > wall_z_max {
+    let Some(attack_scene) = attack_model.scene.as_ref() else {
         return;
-    }
+    };
+    let Some(dead_scene) = dead_model.scene.as_ref() else {
+        return;
+    };
 
-    let wall_base_y = floor_top_y + end_y_rel;
-    let wall_top_y = wall_base_y + config.ramp_dimensions_m.z;
+    let monster_entity = commands
+        .spawn((
+            Monster,
+            MonsterState {
+                mode: MonsterMode::Attack,
+                despawn_timer: Timer::from_seconds(MONSTER_DEAD_DESPAWN_S, TimerMode::Once),
+                just_switched: true,
+            },
+            MonsterHitbox {
+                half_extents: MONSTER_HITBOX_HALF_EXTENTS * MONSTER_MODEL_SCALE,
+            },
+            Transform {
+                translation: Vec3::new(
+                    0.0,
+                    config.ramp_dimensions_m.y * 0.5 + MONSTER_OFFSET_Y_M,
+                    0.0,
+                ),
+                scale: Vec3::splat(MONSTER_MODEL_SCALE),
+                ..default()
+            },
+            Name::new("Monster"),
+        ))
+        .id();
 
-    spawn_one_ramp(
-        commands,
-        assets,
-        flat_model,
-        jump_model,
-        grind_model,
-        slide_model,
-        config,
-        x,
-        wall_base_y,
-        wall_top_y,
-        wall_z,
-        z_min,
-        z_max,
-        RampProfile::Wall,
-    );
+    commands.entity(ramp_entity).add_child(monster_entity);
+    let attack_root = commands
+        .spawn((
+            SceneRoot(attack_scene.clone()),
+            MonsterSceneRoot {
+                mode: MonsterMode::Attack,
+            },
+            Visibility::Visible,
+            Name::new("MonsterAttackScene"),
+        ))
+        .id();
+    let dead_root = commands
+        .spawn((
+            SceneRoot(dead_scene.clone()),
+            MonsterSceneRoot {
+                mode: MonsterMode::Dead,
+            },
+            Visibility::Hidden,
+            Name::new("MonsterDeadScene"),
+        ))
+        .id();
+    commands.entity(monster_entity).add_child(attack_root);
+    commands.entity(monster_entity).add_child(dead_root);
 }
 
 /// Deterministic LCG used for ramp spawning randomness.
@@ -2127,4 +2438,36 @@ fn rng_f32_01(seed: &mut u32) -> f32 {
 /// Returns a random float in [min, max) using the LCG.
 fn rng_f32_range(seed: &mut u32, min: f32, max: f32) -> f32 {
     min + (max - min) * rng_f32_01(seed)
+}
+
+fn find_monster_scene_mode(
+    mut entity: Entity,
+    parents: &Query<&ChildOf>,
+    scenes: &Query<&MonsterSceneRoot>,
+) -> Option<MonsterMode> {
+    loop {
+        if let Ok(scene) = scenes.get(entity) {
+            return Some(scene.mode);
+        }
+        let Ok(parent) = parents.get(entity) else {
+            return None;
+        };
+        entity = parent.parent();
+    }
+}
+
+fn find_monster_entity(
+    mut entity: Entity,
+    parents: &Query<&ChildOf>,
+    monsters: &Query<&MonsterState>,
+) -> Option<Entity> {
+    loop {
+        if monsters.get(entity).is_ok() {
+            return Some(entity);
+        }
+        let Ok(parent) = parents.get(entity) else {
+            return None;
+        };
+        entity = parent.parent();
+    }
 }

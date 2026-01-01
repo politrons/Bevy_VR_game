@@ -4,7 +4,9 @@ use bevy_mod_xr::session::XrTrackingRoot;
 use bevy_xr_utils::actions::XRUtilsActionState;
 
 
-use crate::ramp::{MovingRamp, RampFootprint, RampProfile};
+use crate::ramp::{
+    MonsterHitbox, MonsterMode, MonsterState, MovingRamp, RampFootprint, RampProfile,
+};
 use crate::scene::{FloorParams, PlayerSpawn};
 
 // -------------------------
@@ -36,8 +38,8 @@ const RAMP_SLIDE_DRAG_PER_SEC: f32 = 0.46;
 const RAMP_SLIDE_VEL_EPS: f32 = 0.03;
 /// Require the player to be above the ramp surface to "land" on it (prevents side grabs).
 const RAMP_ABOVE_EPS: f32 = 0.12;
-/// Extra margin for wall hit detection.
-const WALL_HIT_EPS: f32 = 0.05;
+/// Extra margin for monster hit detection.
+const MONSTER_HIT_EPS: f32 = 0.05;
 
 // -------------------------
 // Push tuning constants
@@ -190,6 +192,7 @@ pub fn handle_player(
     mut progress: ResMut<PlayerProgress>,
     road: Option<Res<FloorParams>>,
     ramps: Query<(&Transform, &MovingRamp), Without<XrTrackingRoot>>,
+    monsters: Query<(&GlobalTransform, &MonsterState, &MonsterHitbox), Without<XrTrackingRoot>>,
     mut kin: ResMut<PlayerKinematics>,
 ) {
     let Ok(mut root) = xr_root.single_mut() else {
@@ -504,8 +507,8 @@ pub fn handle_player(
         kin.ramp_velocity_z = 0.0;
     }
 
-    // Wall collision: touching a wall always resets.
-    if hits_wall(root.translation, &ramps) {
+    // Monster collision: touching an attacking monster always resets.
+    if hits_monster(root.translation, &monsters) {
         root.translation = spawn.pos;
         root.rotation = spawn.rot;
         kin.vertical_velocity = 0.0;
@@ -583,24 +586,26 @@ fn ground_y_and_velocity(
     (best_y, best_vel, best_kind, best_slope_dy_dz)
 }
 
-/// Returns true if the player is intersecting a wall obstacle.
-fn hits_wall(
+/// Returns true if the player is intersecting an attacking monster.
+fn hits_monster(
     pos: Vec3,
-    ramps: &Query<(&Transform, &MovingRamp), Without<XrTrackingRoot>>,
+    monsters: &Query<(&GlobalTransform, &MonsterState, &MonsterHitbox), Without<XrTrackingRoot>>,
 ) -> bool {
-    for (t, r) in ramps.iter() {
-        if r.profile != RampProfile::Wall {
+    for (transform, state, hitbox) in monsters.iter() {
+        if state.mode != MonsterMode::Attack {
             continue;
         }
-        let center = t.translation;
+        let center = transform.translation();
         let dx = (pos.x - center.x).abs();
         let dz = (pos.z - center.z).abs();
-        if dx > r.half_extents.x + WALL_HIT_EPS || dz > r.half_extents.y + WALL_HIT_EPS {
+        if dx > hitbox.half_extents.x + MONSTER_HIT_EPS
+            || dz > hitbox.half_extents.z + MONSTER_HIT_EPS
+        {
             continue;
         }
-        let min_y = r.segment_y_start.min(r.segment_y_end);
-        let max_y = r.segment_y_start.max(r.segment_y_end);
-        if pos.y >= min_y - WALL_HIT_EPS && pos.y <= max_y + WALL_HIT_EPS {
+        let min_y = center.y - hitbox.half_extents.y - MONSTER_HIT_EPS;
+        let max_y = center.y + hitbox.half_extents.y + MONSTER_HIT_EPS;
+        if pos.y >= min_y && pos.y <= max_y {
             return true;
         }
     }

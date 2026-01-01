@@ -3,7 +3,7 @@ use bevy_xr_utils::actions::XRUtilsActionState;
 
 use crate::controller::{RightController, RightControllerAim};
 use crate::player::ShootAction;
-use crate::ramp::{MovingRamp, RampProfile};
+use crate::ramp::{MonsterHitbox, MonsterMode, MonsterState};
 
 /// Visual assets for bullets (shared mesh/material).
 #[derive(Resource, Clone)]
@@ -108,7 +108,7 @@ pub(crate) fn move_bullets(
     mut commands: Commands,
     time: Res<Time>,
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet)>,
-    ramps: Query<(Entity, &Transform, &MovingRamp), Without<Bullet>>,
+    mut monsters: Query<(Entity, &GlobalTransform, &mut MonsterState, &MonsterHitbox), Without<Bullet>>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut transform, mut bullet) in &mut bullets {
@@ -120,29 +120,31 @@ pub(crate) fn move_bullets(
             continue;
         }
 
-        let mut hit_wall = None;
-        for (wall_entity, wall_transform, wall) in ramps.iter() {
-            if wall.profile != RampProfile::Wall {
+        let mut hit_monster = None;
+        for (monster_entity, monster_transform, mut monster_state, hitbox) in &mut monsters {
+            if monster_state.mode != MonsterMode::Attack {
                 continue;
             }
-            let center = wall_transform.translation;
+            let center = monster_transform.translation();
             let dx = (transform.translation.x - center.x).abs();
             let dz = (transform.translation.z - center.z).abs();
-            if dx > wall.half_extents.x + BULLET_RADIUS_M
-                || dz > wall.half_extents.y + BULLET_RADIUS_M
+            if dx > hitbox.half_extents.x + BULLET_RADIUS_M
+                || dz > hitbox.half_extents.z + BULLET_RADIUS_M
             {
                 continue;
             }
-            let min_y = wall.segment_y_start.min(wall.segment_y_end) - BULLET_RADIUS_M;
-            let max_y = wall.segment_y_start.max(wall.segment_y_end) + BULLET_RADIUS_M;
+            let min_y = center.y - hitbox.half_extents.y - BULLET_RADIUS_M;
+            let max_y = center.y + hitbox.half_extents.y + BULLET_RADIUS_M;
             if transform.translation.y >= min_y && transform.translation.y <= max_y {
-                hit_wall = Some(wall_entity);
+                monster_state.mode = MonsterMode::Dead;
+                monster_state.despawn_timer.reset();
+                monster_state.just_switched = true;
+                hit_monster = Some(monster_entity);
                 break;
             }
         }
 
-        if let Some(wall_entity) = hit_wall {
-            commands.entity(wall_entity).despawn();
+        if hit_monster.is_some() {
             commands.entity(entity).despawn();
         }
     }

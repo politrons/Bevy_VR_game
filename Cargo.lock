@@ -357,6 +357,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_animation"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfaf3ea6d435f4736b3deb60958270443501f5795c7964b1b504abd3be970b4f"
+dependencies = [
+ "bevy_animation_macros",
+ "bevy_app 0.17.3",
+ "bevy_asset",
+ "bevy_color 0.17.3",
+ "bevy_derive 0.17.3",
+ "bevy_ecs 0.17.3",
+ "bevy_math 0.17.3",
+ "bevy_mesh",
+ "bevy_platform 0.17.3",
+ "bevy_reflect 0.17.3",
+ "bevy_time 0.17.3",
+ "bevy_transform 0.17.3",
+ "bevy_utils 0.17.3",
+ "blake3",
+ "derive_more 2.1.0",
+ "downcast-rs",
+ "either",
+ "petgraph",
+ "ron",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.17",
+ "thread_local",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "bevy_animation_macros"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d577eae7246a1cda461df1b63188619fc6a3c619adba2a8e5a79e9aa51f64671"
+dependencies = [
+ "bevy_macro_utils 0.17.3",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "bevy_app"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -750,6 +794,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3479fbaf897320a3ee30c1626b4a1bee0be874ca27699c3b2f3494891d103d9b"
 dependencies = [
  "base64",
+ "bevy_animation",
  "bevy_app 0.17.3",
  "bevy_asset",
  "bevy_camera",
@@ -905,6 +950,7 @@ checksum = "8f5e645f9e1a24c9667c768b6233beaf4e241739d8ca4fbba59435cc27aabad5"
 dependencies = [
  "bevy_a11y 0.17.3",
  "bevy_android",
+ "bevy_animation",
  "bevy_app 0.17.3",
  "bevy_asset",
  "bevy_audio",
@@ -1317,6 +1363,7 @@ dependencies = [
  "foldhash 0.2.0",
  "glam 0.30.9",
  "inventory",
+ "petgraph",
  "serde",
  "smallvec",
  "smol_str",
@@ -3894,6 +3941,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

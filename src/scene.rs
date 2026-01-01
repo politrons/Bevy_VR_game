@@ -13,7 +13,8 @@ const SKATEBOARD_MODEL_SCALE: f32 = 0.6666667;
 const SKATEBOARD_PITCH_RAD: f32 = -std::f32::consts::FRAC_PI_2;
 const SKATEBOARD_YAW_RAD: f32 = 0.0;
 const SKATEBOARD_ROLL_RAD: f32 = 17.054326;
-const SKATEBOARD_OFFSET_Y_M: f32 = 0.12;
+const SKATEBOARD_OFFSET_X_M: f32 = 0.5;
+const SKATEBOARD_OFFSET_Y_M: f32 = 0.13;
 const SKATEBOARD_OFFSET_Z_M: f32 = 0.0;
 
 #[derive(Resource, Debug, Clone, Copy)]
@@ -587,7 +588,11 @@ pub(crate) fn spawn_skateboard(
                 .spawn((
                     Skateboard,
                     Transform {
-                        translation: Vec3::new(0.0, SKATEBOARD_OFFSET_Y_M, SKATEBOARD_OFFSET_Z_M),
+                        translation: Vec3::new(
+                            SKATEBOARD_OFFSET_X_M,
+                            SKATEBOARD_OFFSET_Y_M,
+                            SKATEBOARD_OFFSET_Z_M,
+                        ),
                         rotation,
                         scale: Vec3::splat(SKATEBOARD_MODEL_SCALE),
                         ..default()

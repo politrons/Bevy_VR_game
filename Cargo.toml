@@ -22,8 +22,10 @@ bevy = { version = "0.17.3", default-features = false, features = [
     "android-native-activity",
     "android_shared_stdcxx",
     "bevy_winit", "bevy_pbr", "bevy_render",
+    "bevy_light",
     "bevy_asset", "bevy_gltf", "bevy_audio",
-    "bevy_gizmos", "bevy_text", "bevy_ui"
+    "bevy_gizmos", "bevy_text", "bevy_ui",
+    "animation"
 ] }
 android_logger = "0.13"
 

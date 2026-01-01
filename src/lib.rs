@@ -1,11 +1,23 @@
 use crate::controller::create_action_entities;
 
+use bevy::animation::{AnimationPlayer, AnimationTarget};
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
+use bevy::camera::primitives::Aabb;
 use bevy::camera::ClearColorConfig;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::schedule::common_conditions::resource_exists;
+use bevy::gltf::{
+    GltfExtras, GltfMaterialExtras, GltfMaterialName, GltfMeshExtras, GltfMeshName,
+    GltfSceneExtras,
+};
+use bevy::mesh::morph::{MeshMorphWeights, MorphWeights};
+use bevy::mesh::skinning::SkinnedMesh;
+use bevy::mesh::Mesh3d;
+use bevy::light::{DirectionalLight, PointLight, SpotLight};
+use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use bevy::render::view::{Hdr, Msaa, NoIndirectDrawing};
+use bevy::transform::components::{GlobalTransform, TransformTreeChanged};
 use bevy::transform::TransformSystems;
 use bevy_mod_openxr::{add_xr_plugins, openxr_session_running, resources::OxrViews};
 use bevy_mod_xr::camera::{XrCamera, XrViewInit};
@@ -56,9 +68,11 @@ use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
 use crate::ramp::{
     move_ramps, prepare_flat_ramp_model, prepare_grind_ramp_model, prepare_jump_ramp_model,
-    prepare_slide_ramp_model, setup_ramp_spawner, spawn_moving_ramps, update_ramp_lod,
-    FlatRampModel, GrindRampModel, JumpRampModel, SlideRampModel, RampLodMaterials,
-    RampRenderAssets, RampSpawnConfig, RampSpawnState,
+    prepare_monster_attack_model, prepare_monster_dead_model, prepare_slide_ramp_model,
+    register_monster_animation_players, setup_ramp_spawner, spawn_moving_ramps, update_monsters,
+    update_ramp_lod, FlatRampModel, GrindRampModel, JumpRampModel, MonsterAttackModel,
+    MonsterDeadModel, MonsterRenderAssets, RampLodMaterials, RampRenderAssets, RampSpawnConfig,
+    RampSpawnState, SlideRampModel,
 };
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
@@ -73,6 +87,7 @@ fn main() {
     setup_logging();
 
     let mut app = App::new();
+    register_scene_types(&mut app);
     app
         .insert_resource(ClearColor(Color::srgb(0.53, 0.81, 0.92)))
         .insert_resource(PlayerSettings::default())
@@ -118,6 +133,18 @@ fn main() {
         )
         .add_systems(
             Update,
+            prepare_monster_attack_model
+                .run_if(resource_exists::<MonsterAttackModel>)
+                .run_if(resource_exists::<MonsterRenderAssets>),
+        )
+        .add_systems(
+            Update,
+            prepare_monster_dead_model
+                .run_if(resource_exists::<MonsterDeadModel>)
+                .run_if(resource_exists::<MonsterRenderAssets>),
+        )
+        .add_systems(
+            Update,
             spawn_planet_floor
                 .run_if(resource_exists::<PlanetFloorAssets>)
                 .run_if(resource_exists::<PlanetFloorState>)
@@ -149,6 +176,11 @@ fn main() {
                 .run_if(resource_exists::<GameplayState>),
         )
         .add_systems(Update, move_ramps.run_if(openxr_session_running))
+        .add_systems(Update, update_monsters.run_if(openxr_session_running))
+        .add_systems(
+            Update,
+            register_monster_animation_players.run_if(openxr_session_running),
+        )
         .add_systems(
             PostUpdate,
             update_ramp_lod
@@ -199,6 +231,35 @@ fn main() {
 // -------------------------
 // XR camera tuning (right-eye flicker fix)
 // -------------------------
+
+fn register_scene_types(app: &mut App) {
+    app.register_type::<Transform>()
+        .register_type::<GlobalTransform>()
+        .register_type::<TransformTreeChanged>()
+        .register_type::<Visibility>()
+        .register_type::<InheritedVisibility>()
+        .register_type::<ViewVisibility>()
+        .register_type::<Name>()
+        .register_type::<Children>()
+        .register_type::<ChildOf>()
+        .register_type::<Mesh3d>()
+        .register_type::<MeshMaterial3d<StandardMaterial>>()
+        .register_type::<Aabb>()
+        .register_type::<SkinnedMesh>()
+        .register_type::<AnimationPlayer>()
+        .register_type::<AnimationTarget>()
+        .register_type::<MorphWeights>()
+        .register_type::<MeshMorphWeights>()
+        .register_type::<GltfExtras>()
+        .register_type::<GltfSceneExtras>()
+        .register_type::<GltfMeshExtras>()
+        .register_type::<GltfMaterialExtras>()
+        .register_type::<GltfMeshName>()
+        .register_type::<GltfMaterialName>()
+        .register_type::<DirectionalLight>()
+        .register_type::<PointLight>()
+        .register_type::<SpotLight>();
+}
 
 /// Tweaks XR camera settings to avoid right-eye flicker artifacts.
 fn tune_xr_cameras(mut commands: Commands, mut cams: Query<(Entity, &mut Camera, &XrCamera)>) {

@@ -9,7 +9,7 @@ pub enum GameplayMode {
     DownhillGameplay,
     /// Deterministic flow: jump pads climb to max, then incline ramps to min.
     JumpGameplay,
-    /// Random gameplay with occasional wall obstacles that must be shot.
+    /// Random gameplay with occasional monsters that must be shot.
     ShooterGameplay,
 }
 
