@@ -36,6 +36,7 @@ pub enum RampProfile {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MonsterMode {
+    Walking,
     Attack,
     Dead,
 }
@@ -53,6 +54,11 @@ pub struct MonsterState {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MonsterHitbox {
     pub half_extents: Vec3,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MonsterWalker {
+    pub speed_mps: f32,
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +110,20 @@ const MONSTER_DEAD_DESPAWN_S: f32 = 3.0;
 const MONSTER_MODEL_SCALE: f32 = 1.0;
 const MONSTER_OFFSET_Y_M: f32 = 0.0;
 const MONSTER_HITBOX_HALF_EXTENTS: Vec3 = Vec3::new(0.45, 0.9, 0.45);
+const SPAWN_SURFACE_EPS_M: f32 = 0.02;
+const MONSTER_WALK_SPEED_MPS: f32 = 0.8;
+const MONSTER_DETECT_RANGE_M: f32 = 2.5;
+const MONSTER_WALK_MARGIN_M: f32 = 0.25;
+const KILLING_RAMP_SPEED_MULT: f32 = 1.3;
+const JUMP_RAMP_SPEED_MULT: f32 = 1.3;
+const DEFAULT_RAMP_SPEED_MULT: f32 = 1.3;
+const KILLING_FLAT_COUNT: u64 = 6;
+const KILLING_GRIND_COUNT: u64 = 3;
+const KILLING_SEQUENCE_LEN: u64 = KILLING_FLAT_COUNT + KILLING_GRIND_COUNT;
+const KILLING_LANE_SEQUENCES: u64 = 3;
+const KILLING_SPACING_SCALE: f32 = 0.8;
+const KILLING_MONSTER_SPAWN_ROW_A: u64 = 3;
+const KILLING_MONSTER_SPAWN_ROW_B: u64 = 5;
 
 impl RampProfile {
     fn is_up(self) -> bool {
@@ -129,6 +149,38 @@ impl RampProfile {
     fn is_flat_like(self) -> bool {
         matches!(self, RampProfile::Flat | RampProfile::Jump | RampProfile::Grind { .. })
     }
+}
+
+pub(crate) fn pick_spawn_on_ramp(
+    ramps: &Query<(&Transform, &MovingRamp)>,
+    target_y: f32,
+) -> Option<Vec3> {
+    let mut best: Option<(f32, Vec3, RampProfile)> = None;
+    for (transform, ramp) in ramps.iter() {
+        if matches!(ramp.profile, RampProfile::Wall | RampProfile::Jump) {
+            continue;
+        }
+        let z = transform.translation.z;
+        let Some(surface_y) = ramp.surface_top_y_at(z) else {
+            continue;
+        };
+        let diff = (surface_y - target_y).abs();
+        let candidate = Vec3::new(transform.translation.x, surface_y + SPAWN_SURFACE_EPS_M, z);
+        match best {
+            None => best = Some((diff, candidate, ramp.profile)),
+            Some((best_diff, _, best_profile)) => {
+                if diff < best_diff
+                    || ((diff - best_diff).abs() <= 0.05
+                        && ramp.profile == RampProfile::Flat
+                        && best_profile != RampProfile::Flat)
+                {
+                    best = Some((diff, candidate, ramp.profile));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, pos, _)| pos)
 }
 
 fn incline_length_scale(dir: RampSlopeDir) -> f32 {
@@ -284,6 +336,7 @@ pub struct RampRenderAssets {
 pub struct MonsterRenderAssets {
     pub attack_gltf: Handle<Gltf>,
     pub dead_gltf: Handle<Gltf>,
+    pub walking_gltf: Handle<Gltf>,
 }
 
 #[derive(Resource, Default)]
@@ -349,6 +402,15 @@ pub struct MonsterAttackModel {
 
 #[derive(Resource, Default)]
 pub struct MonsterDeadModel {
+    pub ready: bool,
+    pub failed: bool,
+    pub scene: Option<Handle<Scene>>,
+    pub graph: Option<Handle<AnimationGraph>>,
+    pub node: Option<AnimationNodeIndex>,
+}
+
+#[derive(Resource, Default)]
+pub struct MonsterWalkingModel {
     pub ready: bool,
     pub failed: bool,
     pub scene: Option<Handle<Scene>>,
@@ -482,6 +544,9 @@ pub struct RampSpawnState {
 
     /// Lane index skipped on the previous row (to avoid repeating gaps).
     pub last_skipped_lane: Option<usize>,
+
+    /// Row counter for KillingMonsterGameplay.
+    pub killing_monster_row: u64,
 }
 
 impl Default for RampSpawnState {
@@ -496,6 +561,7 @@ impl Default for RampSpawnState {
             lane_down_streak: Vec::new(),
             lane_last_low_y: Vec::new(),
             last_skipped_lane: None,
+            killing_monster_row: 0,
         }
     }
 }
@@ -586,6 +652,14 @@ pub(crate) fn setup_ramp_spawner(
             settings.load_animations = true;
         },
     );
+    let monster_walking_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "animations/monster_1_walking.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = true;
+        },
+    );
 
     commands.insert_resource(RampRenderAssets {
         mesh: ramp_mesh,
@@ -600,6 +674,7 @@ pub(crate) fn setup_ramp_spawner(
     commands.insert_resource(MonsterRenderAssets {
         attack_gltf: monster_attack_gltf,
         dead_gltf: monster_dead_gltf,
+        walking_gltf: monster_walking_gltf,
     });
     commands.insert_resource(FlatRampModel::default());
     commands.insert_resource(JumpRampModel::default());
@@ -607,6 +682,7 @@ pub(crate) fn setup_ramp_spawner(
     commands.insert_resource(SlideRampModel::default());
     commands.insert_resource(MonsterAttackModel::default());
     commands.insert_resource(MonsterDeadModel::default());
+    commands.insert_resource(MonsterWalkingModel::default());
     commands.insert_resource(RampLodMaterials::default());
     commands.insert_resource(config);
     commands.insert_resource(RampSpawnState::default());
@@ -936,6 +1012,57 @@ pub(crate) fn prepare_monster_dead_model(
     }
 }
 
+/// Caches the monster walking GLB scene and animation.
+pub(crate) fn prepare_monster_walking_model(
+    assets: Option<Res<MonsterRenderAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    model: Option<ResMut<MonsterWalkingModel>>,
+) {
+    let (Some(assets), Some(mut model)) = (assets, model) else {
+        return;
+    };
+    if model.ready || model.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.walking_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.walking_gltf) else {
+                return;
+            };
+            if gltf.scenes.is_empty() {
+                log::warn!("Monster walking model has no scenes.");
+                model.failed = true;
+                return;
+            }
+            model.scene = gltf.default_scene.clone().or_else(|| gltf.scenes.first().cloned());
+            if model.scene.is_none() {
+                log::warn!("Monster walking model has no scene.");
+                model.failed = true;
+                return;
+            }
+
+            if let Some(clip) = gltf.animations.first() {
+                let (graph, node) = AnimationGraph::from_clip(clip.clone());
+                let handle = graphs.add(graph);
+                model.graph = Some(handle);
+                model.node = Some(node);
+            }
+            model.ready = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Monster walking model failed to load: {:?}", err);
+            model.failed = true;
+        }
+        _ => {}
+    }
+}
+
 /// Spawn ramps continuously.
 ///
 /// Ramps spawn fully inside a window that extends behind the floor for distant visuals.
@@ -957,6 +1084,7 @@ pub(crate) fn spawn_moving_ramps(
     slide_model: Option<Res<SlideRampModel>>,
     monster_attack: Option<Res<MonsterAttackModel>>,
     monster_dead: Option<Res<MonsterDeadModel>>,
+    monster_walking: Option<Res<MonsterWalkingModel>>,
     gameplay: Option<ResMut<GameplayState>>,
 ) {
     let mut gameplay = gameplay;
@@ -964,7 +1092,24 @@ pub(crate) fn spawn_moving_ramps(
         .as_ref()
         .map(|g| g.current)
         .unwrap_or(GameplayMode::RandomGameplay);
+    let ramp_speed_mps = if mode == GameplayMode::KillingMonsterGameplay {
+        config.ramp_speed_z_mps * KILLING_RAMP_SPEED_MULT
+    } else if mode == GameplayMode::JumpGameplay {
+        config.ramp_speed_z_mps * JUMP_RAMP_SPEED_MULT
+    } else {
+        config.ramp_speed_z_mps * DEFAULT_RAMP_SPEED_MULT
+    };
     let allow_grind = mode == GameplayMode::RandomGameplay;
+    let spawn_interval_s = if mode == GameplayMode::KillingMonsterGameplay {
+        let flat_len = config.ramp_dimensions_m.z * FLAT_SEGMENT_LENGTH_SCALE * KILLING_SPACING_SCALE;
+        if ramp_speed_mps > f32::EPSILON {
+            flat_len / ramp_speed_mps
+        } else {
+            config.spawn_interval_s
+        }
+    } else {
+        config.spawn_interval_s
+    };
 
     let floor_top_y = floor_top_y.0;
 
@@ -999,7 +1144,16 @@ pub(crate) fn spawn_moving_ramps(
 
     // Spawn at the beginning (but fully on the floor).
     let z_spawn = z_spawn_min;
-    let lane_x_jitter = lane_safe_x_jitter_m(&config);
+    let lane_x_jitter = if mode == GameplayMode::KillingMonsterGameplay {
+        0.0
+    } else {
+        lane_safe_x_jitter_m(&config)
+    };
+    let z_spawn_jitter = if mode == GameplayMode::KillingMonsterGameplay {
+        0.0
+    } else {
+        config.z_spawn_jitter_m
+    };
 
     // Lazy-init per-lane state.
     if state.lane_next_y.len() != config.lanes {
@@ -1014,8 +1168,8 @@ pub(crate) fn spawn_moving_ramps(
     if !state.initialized {
         state.initialized = true;
 
-        let spacing = if config.spawn_interval_s > f32::EPSILON && config.ramp_speed_z_mps > 0.0 {
-            config.spawn_interval_s * config.ramp_speed_z_mps
+        let spacing = if spawn_interval_s > f32::EPSILON && ramp_speed_mps > 0.0 {
+            spawn_interval_s * ramp_speed_mps
         } else {
             config.z_spacing_m
         };
@@ -1041,13 +1195,27 @@ pub(crate) fn spawn_moving_ramps(
             } else {
                 (DownhillPhase::FlatUp, None)
             };
-            let skip_lane = if is_downhill_like(mode) && config.lanes > 1 {
+            let seq_index = if mode == GameplayMode::KillingMonsterGameplay {
+                state.killing_monster_row % KILLING_SEQUENCE_LEN
+            } else {
+                0
+            };
+            let skip_lane = if mode == GameplayMode::KillingMonsterGameplay {
+                None
+            } else if is_downhill_like(mode) && config.lanes > 1 {
                 let last_skipped_lane = state.last_skipped_lane;
                 pick_skip_lane(&mut state.seed, config.lanes, last_skipped_lane)
             } else {
                 None
             };
-
+            let should_spawn_walking_monster = mode == GameplayMode::KillingMonsterGameplay
+                && (seq_index == KILLING_MONSTER_SPAWN_ROW_A
+                    || seq_index == KILLING_MONSTER_SPAWN_ROW_B);
+            let active_killing_lane = if mode == GameplayMode::KillingMonsterGameplay {
+                killing_active_lane(state.killing_monster_row, config.lanes)
+            } else {
+                None
+            };
             let mut prev_lane_end_y: Option<f32> = None;
 
             for lane in 0..config.lanes {
@@ -1081,6 +1249,17 @@ pub(crate) fn spawn_moving_ramps(
                         down_angle_deg,
                         RampProfile::Jump,
                     ),
+                    GameplayMode::KillingMonsterGameplay => {
+                        let y = config.min_height_above_floor_m;
+                        let profile = if seq_index < KILLING_FLAT_COUNT {
+                            RampProfile::Flat
+                        } else {
+                            RampProfile::Grind {
+                                slide_angle_deg: config.allowed_incline_angles_deg[0],
+                            }
+                        };
+                        (profile, y, y)
+                    }
                 };
 
                 // Clamp to the previous lane end-Y for the same Z-step
@@ -1098,15 +1277,13 @@ pub(crate) fn spawn_moving_ramps(
                 // - Uphill: lowest point is the start; never allow the end to dip below it.
                 let (profile, end_y_rel) = enforce_profile_monotonic(profile, start_y_rel, end_y_rel);
 
-                let mut z = z_base
-                    + rng_f32_range(
-                        &mut state.seed,
-                        -config.z_spawn_jitter_m,
-                        config.z_spawn_jitter_m,
-                    );
+                let mut z =
+                    z_base + rng_f32_range(&mut state.seed, -z_spawn_jitter, z_spawn_jitter);
                 z = z.clamp(z_spawn_min, z_spawn_max);
 
-                if skip_lane == Some(lane) {
+                let is_inactive_killing_lane = mode == GameplayMode::KillingMonsterGameplay
+                    && active_killing_lane != Some(lane);
+                if skip_lane == Some(lane) || is_inactive_killing_lane {
                     update_lane_history(&mut state, lane, profile);
                     state.lane_next_y[lane] = if is_downhill_like(mode) {
                         if profile.is_up() {
@@ -1130,6 +1307,7 @@ pub(crate) fn spawn_moving_ramps(
                     grind_model.as_deref(),
                     slide_model.as_deref(),
                     &config,
+                    ramp_speed_mps,
                     x,
                     floor_top_y + start_y_rel,
                     floor_top_y + end_y_rel,
@@ -1162,6 +1340,18 @@ pub(crate) fn spawn_moving_ramps(
                         MonsterSpawnSurface::Up,
                         DOWNHILL_UP_MONSTER_PROB,
                     );
+                } else if mode == GameplayMode::KillingMonsterGameplay
+                    && should_spawn_walking_monster
+                    && active_killing_lane == Some(lane)
+                {
+                    spawn_walking_monster(
+                        &mut commands,
+                        monster_attack.as_deref(),
+                        monster_dead.as_deref(),
+                        monster_walking.as_deref(),
+                        &config,
+                        ramp_entity,
+                    );
                 }
 
                 update_lane_history(&mut state, lane, profile);
@@ -1179,12 +1369,15 @@ pub(crate) fn spawn_moving_ramps(
                 prev_lane_end_y = Some(end_y_rel);
             }
             state.last_skipped_lane = skip_lane;
+            if mode == GameplayMode::KillingMonsterGameplay {
+                state.killing_monster_row = state.killing_monster_row.wrapping_add(1);
+            }
         }
     }
 
     // Continuous spawn cadence.
     state.accum_s += time.delta_secs();
-    if state.accum_s < config.spawn_interval_s {
+    if state.accum_s < spawn_interval_s {
         return;
     }
     state.accum_s = 0.0;
@@ -1197,14 +1390,28 @@ pub(crate) fn spawn_moving_ramps(
     } else {
         (DownhillPhase::FlatUp, None)
     };
+    let seq_index = if mode == GameplayMode::KillingMonsterGameplay {
+        state.killing_monster_row % KILLING_SEQUENCE_LEN
+    } else {
+        0
+    };
 
-    let skip_lane = if is_downhill_like(mode) && config.lanes > 1 {
+    let skip_lane = if mode == GameplayMode::KillingMonsterGameplay {
+        None
+    } else if is_downhill_like(mode) && config.lanes > 1 {
         let last_skipped_lane = state.last_skipped_lane;
         pick_skip_lane(&mut state.seed, config.lanes, last_skipped_lane)
     } else {
         None
     };
-
+    let should_spawn_walking_monster = mode == GameplayMode::KillingMonsterGameplay
+        && (seq_index == KILLING_MONSTER_SPAWN_ROW_A
+            || seq_index == KILLING_MONSTER_SPAWN_ROW_B);
+    let active_killing_lane = if mode == GameplayMode::KillingMonsterGameplay {
+        killing_active_lane(state.killing_monster_row, config.lanes)
+    } else {
+        None
+    };
     let mut prev_lane_end_y: Option<f32> = None;
 
     for lane in 0..config.lanes {
@@ -1236,6 +1443,17 @@ pub(crate) fn spawn_moving_ramps(
                 down_angle_deg,
                 RampProfile::Jump,
             ),
+            GameplayMode::KillingMonsterGameplay => {
+                let y = config.min_height_above_floor_m;
+                let profile = if seq_index < KILLING_FLAT_COUNT {
+                    RampProfile::Flat
+                } else {
+                    RampProfile::Grind {
+                        slide_angle_deg: config.allowed_incline_angles_deg[0],
+                    }
+                };
+                (profile, y, y)
+            }
         };
         let (profile, end_y_rel) = clamp_to_neighbor_lane(
             &config,
@@ -1246,15 +1464,12 @@ pub(crate) fn spawn_moving_ramps(
         );
         let (profile, end_y_rel) = enforce_profile_monotonic(profile, start_y_rel, end_y_rel);
 
-        let mut z = z_spawn
-            + rng_f32_range(
-                &mut state.seed,
-                -config.z_spawn_jitter_m,
-                config.z_spawn_jitter_m,
-            );
+        let mut z = z_spawn + rng_f32_range(&mut state.seed, -z_spawn_jitter, z_spawn_jitter);
         z = z.clamp(z_spawn_min, z_spawn_max);
 
-        if skip_lane == Some(lane) {
+        let is_inactive_killing_lane =
+            mode == GameplayMode::KillingMonsterGameplay && active_killing_lane != Some(lane);
+        if skip_lane == Some(lane) || is_inactive_killing_lane {
             update_lane_history(&mut state, lane, profile);
             state.lane_next_y[lane] = if is_downhill_like(mode) {
                 if profile.is_up() {
@@ -1278,6 +1493,7 @@ pub(crate) fn spawn_moving_ramps(
             grind_model.as_deref(),
             slide_model.as_deref(),
             &config,
+            ramp_speed_mps,
             x,
             floor_top_y + start_y_rel,
             floor_top_y + end_y_rel,
@@ -1310,6 +1526,18 @@ pub(crate) fn spawn_moving_ramps(
                 MonsterSpawnSurface::Up,
                 DOWNHILL_UP_MONSTER_PROB,
             );
+        } else if mode == GameplayMode::KillingMonsterGameplay
+            && should_spawn_walking_monster
+            && active_killing_lane == Some(lane)
+        {
+            spawn_walking_monster(
+                &mut commands,
+                monster_attack.as_deref(),
+                monster_dead.as_deref(),
+                monster_walking.as_deref(),
+                &config,
+                ramp_entity,
+            );
         }
 
         update_lane_history(&mut state, lane, profile);
@@ -1326,6 +1554,9 @@ pub(crate) fn spawn_moving_ramps(
         prev_lane_end_y = Some(end_y_rel);
     }
     state.last_skipped_lane = skip_lane;
+    if mode == GameplayMode::KillingMonsterGameplay {
+        state.killing_monster_row = state.killing_monster_row.wrapping_add(1);
+    }
 }
 
 /// Picks a lane to skip, avoiding the previous skipped lane when possible.
@@ -1348,6 +1579,15 @@ fn pick_skip_lane(seed: &mut u32, lanes: usize, last: Option<usize>) -> Option<u
         }
     }
     Some(lane)
+}
+
+fn killing_active_lane(row: u64, lanes: usize) -> Option<usize> {
+    if lanes == 0 {
+        return None;
+    }
+    let sequence_index = row / KILLING_SEQUENCE_LEN;
+    let lane_block = sequence_index / KILLING_LANE_SEQUENCES;
+    Some((lane_block as usize) % lanes)
 }
 
 /// Updates all [`MovingRamp`] entities by advancing them forward in Z only.
@@ -1378,11 +1618,116 @@ pub(crate) fn move_ramps(
 pub(crate) fn update_monsters(
     mut commands: Commands,
     time: Res<Time>,
-    mut monsters: Query<(Entity, &mut MonsterState, Option<&Children>)>,
+    xr_root: Query<&GlobalTransform, With<XrTrackingRoot>>,
+    config: Res<RampSpawnConfig>,
+    ramps: Query<(Entity, &Transform, &MovingRamp, Option<&Children>), Without<Monster>>,
+    parents: Query<&ChildOf>,
+    monster_entities: Query<(), With<Monster>>,
+    mut monsters: Query<(
+        Entity,
+        &mut MonsterState,
+        &mut Transform,
+        Option<&MonsterWalker>,
+        Option<&Children>,
+        &GlobalTransform,
+    ), With<Monster>>,
     mut scenes: Query<(&mut Visibility, &MonsterSceneRoot)>,
     mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions, &MonsterSceneAnimation)>,
 ) {
-    for (entity, mut state, children) in &mut monsters {
+    let player_pos = xr_root.single().ok().map(|t| t.translation());
+
+    for (entity, mut state, mut transform, walker, children, global) in &mut monsters {
+        if state.mode == MonsterMode::Walking {
+            if let Some(walker) = walker {
+                let Ok(parent) = parents.get(entity) else {
+                    continue;
+                };
+                let ramp_entity = parent.parent();
+                let Ok((_, ramp_transform, ramp, _)) = ramps.get(ramp_entity) else {
+                    continue;
+                };
+
+                let local_end_z =
+                    ramp.segment_z_end - ramp_transform.translation.z - MONSTER_WALK_MARGIN_M;
+                let step = walker.speed_mps * time.delta_secs();
+                let next_local_z = transform.translation.z + step;
+
+                if next_local_z >= local_end_z {
+                    let lane_x = ramp_transform.translation.x;
+                    let lane_eps = config.lane_spacing_m * 0.45;
+                    let mut next_ramp: Option<(Entity, f32, f32)> = None;
+
+                    for (candidate_entity, candidate_transform, candidate_ramp, candidate_children) in
+                        &ramps
+                    {
+                        if candidate_entity == ramp_entity {
+                            continue;
+                        }
+                        if (candidate_transform.translation.x - lane_x).abs() > lane_eps {
+                            continue;
+                        }
+                        if candidate_transform.translation.z <= ramp_transform.translation.z {
+                            continue;
+                        }
+                        let mut occupied = false;
+                        if let Some(children) = candidate_children {
+                            for child in children.iter() {
+                                if monster_entities.get(child).is_ok() {
+                                    occupied = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if occupied {
+                            continue;
+                        }
+
+                        let candidate_center_z = candidate_transform.translation.z;
+                        if next_ramp
+                            .map(|(_, best_center_z, _)| candidate_center_z < best_center_z)
+                            .unwrap_or(true)
+                        {
+                            next_ramp = Some((
+                                candidate_entity,
+                                candidate_center_z,
+                                candidate_ramp.segment_z_start,
+                            ));
+                        }
+                    }
+
+                    if let Some((next_entity, next_center_z, next_start_z)) = next_ramp {
+                        commands.entity(entity).set_parent_in_place(next_entity);
+                        let next_local_z =
+                            next_start_z - next_center_z + MONSTER_WALK_MARGIN_M;
+                        transform.translation = Vec3::new(
+                            0.0,
+                            config.ramp_dimensions_m.y * 0.5 + MONSTER_OFFSET_Y_M,
+                            next_local_z,
+                        );
+                    } else {
+                        transform.translation.z = local_end_z;
+                        state.mode = MonsterMode::Attack;
+                        state.just_switched = true;
+                    }
+                } else {
+                    transform.translation.z = next_local_z;
+                }
+            }
+            if let Some(player_pos) = player_pos {
+                let monster_pos = global.translation();
+                let horizontal = Vec2::new(
+                    monster_pos.x - player_pos.x,
+                    monster_pos.z - player_pos.z,
+                )
+                .length();
+                let vertical = (monster_pos.y - player_pos.y).abs();
+                if horizontal <= MONSTER_DETECT_RANGE_M && vertical <= 2.0 {
+                    state.mode = MonsterMode::Attack;
+                    state.just_switched = true;
+                }
+            }
+        }
+
         if state.mode == MonsterMode::Dead {
             state.despawn_timer.tick(time.delta());
             if state.despawn_timer.is_finished() {
@@ -1433,12 +1778,13 @@ pub(crate) fn register_monster_animation_players(
     mut commands: Commands,
     attack: Option<Res<MonsterAttackModel>>,
     dead: Option<Res<MonsterDeadModel>>,
+    walking: Option<Res<MonsterWalkingModel>>,
     parents: Query<&ChildOf>,
     scenes: Query<&MonsterSceneRoot>,
     monsters: Query<&MonsterState>,
     mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
 ) {
-    let (Some(attack), Some(dead)) = (attack, dead) else {
+    let (Some(attack), Some(dead), Some(walking)) = (attack, dead, walking) else {
         return;
     };
 
@@ -1451,6 +1797,7 @@ pub(crate) fn register_monster_animation_players(
         };
 
         let (graph, node, repeat) = match scene_mode {
+            MonsterMode::Walking => (walking.graph.as_ref(), walking.node, true),
             MonsterMode::Attack => (attack.graph.as_ref(), attack.node, true),
             MonsterMode::Dead => (dead.graph.as_ref(), dead.node, false),
         };
@@ -1930,6 +2277,7 @@ fn spawn_one_ramp(
     grind_model: Option<&GrindRampModel>,
     slide_model: Option<&SlideRampModel>,
     config: &RampSpawnConfig,
+    ramp_speed_mps: f32,
     x: f32,
     y_start: f32,
     y_end: f32,
@@ -2051,10 +2399,10 @@ fn spawn_one_ramp(
             half_extents,
             footprint,
             thickness,
-            z_speed_mps: config.ramp_speed_z_mps,
+            z_speed_mps: ramp_speed_mps,
             z_min,
             z_max: z_max + half_extents.y + 0.5,
-            current_vel: Vec3::new(0.0, 0.0, config.ramp_speed_z_mps),
+            current_vel: Vec3::new(0.0, 0.0, ramp_speed_mps),
             profile,
             segment_z_start,
             segment_z_end,
@@ -2457,6 +2805,98 @@ fn maybe_spawn_monster(
             Name::new("MonsterDeadScene"),
         ))
         .id();
+    commands.entity(monster_entity).add_child(attack_root);
+    commands.entity(monster_entity).add_child(dead_root);
+}
+
+fn spawn_walking_monster(
+    commands: &mut Commands,
+    attack_model: Option<&MonsterAttackModel>,
+    dead_model: Option<&MonsterDeadModel>,
+    walking_model: Option<&MonsterWalkingModel>,
+    config: &RampSpawnConfig,
+    ramp_entity: Entity,
+) {
+    let (Some(attack_model), Some(dead_model), Some(walking_model)) =
+        (attack_model, dead_model, walking_model)
+    else {
+        return;
+    };
+    if !attack_model.ready || !dead_model.ready || !walking_model.ready {
+        return;
+    }
+    let (Some(attack_scene), Some(dead_scene), Some(walking_scene)) = (
+        attack_model.scene.as_ref(),
+        dead_model.scene.as_ref(),
+        walking_model.scene.as_ref(),
+    ) else {
+        return;
+    };
+
+    let ramp_half_z = config.ramp_dimensions_m.z * 0.5 * FLAT_SEGMENT_LENGTH_SCALE;
+    let start_z = (-ramp_half_z + MONSTER_WALK_MARGIN_M).min(0.0);
+
+    let monster_entity = commands
+        .spawn((
+            Monster,
+            MonsterState {
+                mode: MonsterMode::Walking,
+                despawn_timer: Timer::from_seconds(MONSTER_DEAD_DESPAWN_S, TimerMode::Once),
+                just_switched: true,
+            },
+            MonsterWalker {
+                speed_mps: MONSTER_WALK_SPEED_MPS,
+            },
+            MonsterHitbox {
+                half_extents: MONSTER_HITBOX_HALF_EXTENTS * MONSTER_MODEL_SCALE,
+            },
+            Transform {
+                translation: Vec3::new(
+                    0.0,
+                    config.ramp_dimensions_m.y * 0.5 + MONSTER_OFFSET_Y_M,
+                    start_z,
+                ),
+                scale: Vec3::splat(MONSTER_MODEL_SCALE),
+                ..default()
+            },
+            Name::new("Monster"),
+        ))
+        .id();
+
+    commands.entity(ramp_entity).add_child(monster_entity);
+
+    let walking_root = commands
+        .spawn((
+            SceneRoot(walking_scene.clone()),
+            MonsterSceneRoot {
+                mode: MonsterMode::Walking,
+            },
+            Visibility::Visible,
+            Name::new("MonsterWalkingScene"),
+        ))
+        .id();
+    let attack_root = commands
+        .spawn((
+            SceneRoot(attack_scene.clone()),
+            MonsterSceneRoot {
+                mode: MonsterMode::Attack,
+            },
+            Visibility::Hidden,
+            Name::new("MonsterAttackScene"),
+        ))
+        .id();
+    let dead_root = commands
+        .spawn((
+            SceneRoot(dead_scene.clone()),
+            MonsterSceneRoot {
+                mode: MonsterMode::Dead,
+            },
+            Visibility::Hidden,
+            Name::new("MonsterDeadScene"),
+        ))
+        .id();
+
+    commands.entity(monster_entity).add_child(walking_root);
     commands.entity(monster_entity).add_child(attack_root);
     commands.entity(monster_entity).add_child(dead_root);
 }

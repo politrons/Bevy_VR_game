@@ -13,10 +13,17 @@
             android:name="android.app.NativeActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:theme="@style/Theme.BevyQuest"
             android:screenOrientation="landscape"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode">
 
             <meta-data android:name="com.oculus.vr.focus.aware" android:value="true"/>
+            <meta-data
+                android:name="com.oculus.vr.application.splash_screen"
+                android:resource="@drawable/logo" />
+            <meta-data
+                android:name="com.oculus.vr.application.splash_screen2"
+                android:resource="@drawable/logo" />
 
             <!-- The name of our Rust library -->
             <meta-data

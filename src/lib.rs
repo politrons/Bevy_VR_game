@@ -68,11 +68,12 @@ use crate::controller::register_controller_cubes;
 use crate::gameplay::{setup_gameplay, update_gameplay_mode, GameplayState};
 use crate::ramp::{
     move_ramps, prepare_flat_ramp_model, prepare_grind_ramp_model, prepare_jump_ramp_model,
-    prepare_monster_attack_model, prepare_monster_dead_model, prepare_slide_ramp_model,
+    prepare_monster_attack_model, prepare_monster_dead_model, prepare_monster_walking_model,
+    prepare_slide_ramp_model,
     register_monster_animation_players, setup_ramp_spawner, spawn_moving_ramps, update_monsters,
     update_ramp_lod, FlatRampModel, GrindRampModel, JumpRampModel, MonsterAttackModel,
-    MonsterDeadModel, MonsterRenderAssets, RampLodMaterials, RampRenderAssets, RampSpawnConfig,
-    RampSpawnState, SlideRampModel,
+    MonsterDeadModel, MonsterRenderAssets, MonsterWalkingModel, RampLodMaterials,
+    RampRenderAssets, RampSpawnConfig, RampSpawnState, SlideRampModel,
 };
 use crate::shooting::{move_bullets, setup_bullet_assets, spawn_bullets, BulletAssets, BulletFireState};
 use crate::scene::{
@@ -141,6 +142,12 @@ fn main() {
             Update,
             prepare_monster_dead_model
                 .run_if(resource_exists::<MonsterDeadModel>)
+                .run_if(resource_exists::<MonsterRenderAssets>),
+        )
+        .add_systems(
+            Update,
+            prepare_monster_walking_model
+                .run_if(resource_exists::<MonsterWalkingModel>)
                 .run_if(resource_exists::<MonsterRenderAssets>),
         )
         .add_systems(

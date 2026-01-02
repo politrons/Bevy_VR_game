@@ -122,39 +122,76 @@ pub(crate) fn move_bullets(
     let dt = time.delta_secs();
     for (entity, mut transform, mut bullet) in &mut bullets {
         let step = bullet.velocity * dt;
-        transform.translation += step;
-        bullet.remaining_m -= step.length();
-        if bullet.remaining_m <= 0.0 {
+        let start = transform.translation;
+        let end = start + step;
+
+        let mut hit_entity = None;
+        let mut hit_t = f32::INFINITY;
+        for (monster_entity, monster_transform, monster_state, hitbox) in &mut monsters {
+            if monster_state.mode == MonsterMode::Dead {
+                continue;
+            }
+            let center = monster_transform.translation();
+            let expanded = hitbox.half_extents + Vec3::splat(BULLET_RADIUS_M);
+            let min = center - expanded;
+            let max = center + expanded;
+            if let Some(t) = segment_aabb_entry(start, end, min, max) {
+                if t < hit_t {
+                    hit_t = t;
+                    hit_entity = Some(monster_entity);
+                }
+            }
+        }
+
+        if let Some(monster_entity) = hit_entity {
+            transform.translation = start + (end - start) * hit_t;
+            if let Ok((_, _, mut monster_state, _)) = monsters.get_mut(monster_entity) {
+                monster_state.mode = MonsterMode::Dead;
+                monster_state.despawn_timer.reset();
+                monster_state.just_switched = true;
+            }
             commands.entity(entity).despawn();
             continue;
         }
 
-        let mut hit_monster = None;
-        for (monster_entity, monster_transform, mut monster_state, hitbox) in &mut monsters {
-            if monster_state.mode != MonsterMode::Attack {
-                continue;
-            }
-            let center = monster_transform.translation();
-            let dx = (transform.translation.x - center.x).abs();
-            let dz = (transform.translation.z - center.z).abs();
-            if dx > hitbox.half_extents.x + BULLET_RADIUS_M
-                || dz > hitbox.half_extents.z + BULLET_RADIUS_M
-            {
-                continue;
-            }
-            let min_y = center.y - hitbox.half_extents.y - BULLET_RADIUS_M;
-            let max_y = center.y + hitbox.half_extents.y + BULLET_RADIUS_M;
-            if transform.translation.y >= min_y && transform.translation.y <= max_y {
-                monster_state.mode = MonsterMode::Dead;
-                monster_state.despawn_timer.reset();
-                monster_state.just_switched = true;
-                hit_monster = Some(monster_entity);
-                break;
-            }
-        }
-
-        if hit_monster.is_some() {
+        transform.translation = end;
+        bullet.remaining_m -= step.length();
+        if bullet.remaining_m <= 0.0 {
             commands.entity(entity).despawn();
         }
     }
+}
+
+fn segment_aabb_entry(start: Vec3, end: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let dir = end - start;
+    let mut tmin: f32 = 0.0;
+    let mut tmax: f32 = 1.0;
+    let axes = [
+        (start.x, dir.x, min.x, max.x),
+        (start.y, dir.y, min.y, max.y),
+        (start.z, dir.z, min.z, max.z),
+    ];
+    for (s, d, min_a, max_a) in axes {
+        if d.abs() < 1.0e-6 {
+            if s < min_a || s > max_a {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / d;
+        let mut t1 = (min_a - s) * inv;
+        let mut t2 = (max_a - s) * inv;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmin > tmax {
+            return None;
+        }
+    }
+    if tmax < 0.0 || tmin > 1.0 {
+        return None;
+    }
+    Some(tmin.max(0.0))
 }
