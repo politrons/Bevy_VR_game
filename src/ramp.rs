@@ -114,9 +114,9 @@ const SPAWN_SURFACE_EPS_M: f32 = 0.02;
 const MONSTER_WALK_SPEED_MPS: f32 = 0.8;
 const MONSTER_DETECT_RANGE_M: f32 = 2.5;
 const MONSTER_WALK_MARGIN_M: f32 = 0.25;
-const KILLING_RAMP_SPEED_MULT: f32 = 1.3;
-const JUMP_RAMP_SPEED_MULT: f32 = 1.3;
-const DEFAULT_RAMP_SPEED_MULT: f32 = 1.3;
+const KILLING_RAMP_SPEED_MULT: f32 = 1.56;
+const JUMP_RAMP_SPEED_MULT: f32 = 1.56;
+const DEFAULT_RAMP_SPEED_MULT: f32 = 1.56;
 const KILLING_FLAT_COUNT: u64 = 6;
 const KILLING_GRIND_COUNT: u64 = 3;
 const KILLING_SEQUENCE_LEN: u64 = KILLING_FLAT_COUNT + KILLING_GRIND_COUNT;
@@ -594,6 +594,8 @@ pub(crate) fn setup_ramp_spawner(
         base_color: Color::srgb(0.90, 0.10, 0.60),
         perceptual_roughness: 0.9,
         metallic: 0.0,
+        double_sided: true,
+        cull_mode: None,
         ..default()
     });
     let debug_surface_material = materials.add(StandardMaterial {
@@ -694,6 +696,7 @@ pub(crate) fn prepare_flat_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     model: Option<ResMut<FlatRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
@@ -726,6 +729,7 @@ pub(crate) fn prepare_flat_ramp_model(
                         .material
                         .clone()
                         .unwrap_or_else(|| assets.material.clone());
+                    force_double_sided(&mut materials, &material);
                     primitives.push((primitive.mesh.clone(), material));
                 }
             }
@@ -751,6 +755,7 @@ pub(crate) fn prepare_jump_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     model: Option<ResMut<JumpRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
@@ -783,6 +788,7 @@ pub(crate) fn prepare_jump_ramp_model(
                         .material
                         .clone()
                         .unwrap_or_else(|| assets.material.clone());
+                    force_double_sided(&mut materials, &material);
                     primitives.push((primitive.mesh.clone(), material));
                 }
             }
@@ -808,6 +814,7 @@ pub(crate) fn prepare_grind_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     model: Option<ResMut<GrindRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
@@ -840,6 +847,7 @@ pub(crate) fn prepare_grind_ramp_model(
                         .material
                         .clone()
                         .unwrap_or_else(|| assets.material.clone());
+                    force_double_sided(&mut materials, &material);
                     primitives.push((primitive.mesh.clone(), material));
                 }
             }
@@ -865,6 +873,7 @@ pub(crate) fn prepare_slide_ramp_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     model: Option<ResMut<SlideRampModel>>,
 ) {
     let (Some(assets), Some(mut model)) = (assets, model) else {
@@ -897,6 +906,7 @@ pub(crate) fn prepare_slide_ramp_model(
                         .material
                         .clone()
                         .unwrap_or_else(|| assets.material.clone());
+                    force_double_sided(&mut materials, &material);
                     primitives.push((primitive.mesh.clone(), material));
                 }
             }
@@ -1092,13 +1102,14 @@ pub(crate) fn spawn_moving_ramps(
         .as_ref()
         .map(|g| g.current)
         .unwrap_or(GameplayMode::RandomGameplay);
-    let ramp_speed_mps = if mode == GameplayMode::KillingMonsterGameplay {
-        config.ramp_speed_z_mps * KILLING_RAMP_SPEED_MULT
+    let speed_mult = if mode == GameplayMode::KillingMonsterGameplay {
+        KILLING_RAMP_SPEED_MULT
     } else if mode == GameplayMode::JumpGameplay {
-        config.ramp_speed_z_mps * JUMP_RAMP_SPEED_MULT
+        JUMP_RAMP_SPEED_MULT
     } else {
-        config.ramp_speed_z_mps * DEFAULT_RAMP_SPEED_MULT
+        DEFAULT_RAMP_SPEED_MULT
     };
+    let ramp_speed_mps = config.ramp_speed_z_mps * speed_mult;
     let allow_grind = mode == GameplayMode::RandomGameplay;
     let spawn_interval_s = if mode == GameplayMode::KillingMonsterGameplay {
         let flat_len = config.ramp_dimensions_m.z * FLAT_SEGMENT_LENGTH_SCALE * KILLING_SPACING_SCALE;
@@ -1108,7 +1119,11 @@ pub(crate) fn spawn_moving_ramps(
             config.spawn_interval_s
         }
     } else {
-        config.spawn_interval_s
+        if speed_mult > f32::EPSILON {
+            config.spawn_interval_s / speed_mult
+        } else {
+            config.spawn_interval_s
+        }
     };
 
     let floor_top_y = floor_top_y.0;
@@ -1620,6 +1635,7 @@ pub(crate) fn update_monsters(
     time: Res<Time>,
     xr_root: Query<&GlobalTransform, With<XrTrackingRoot>>,
     config: Res<RampSpawnConfig>,
+    floor: Option<Res<FloorParams>>,
     ramps: Query<(Entity, &Transform, &MovingRamp, Option<&Children>), Without<Monster>>,
     parents: Query<&ChildOf>,
     monster_entities: Query<(), With<Monster>>,
@@ -1635,6 +1651,8 @@ pub(crate) fn update_monsters(
     mut players: Query<(&mut AnimationPlayer, &mut AnimationTransitions, &MonsterSceneAnimation)>,
 ) {
     let player_pos = xr_root.single().ok().map(|t| t.translation());
+    let player_z = player_pos.map(|pos| pos.z);
+    let floor = floor.as_deref();
 
     for (entity, mut state, mut transform, walker, children, global) in &mut monsters {
         if state.mode == MonsterMode::Walking {
@@ -1770,6 +1788,36 @@ pub(crate) fn update_monsters(
             }
             state.just_switched = false;
         }
+
+        let base_y = config.ramp_dimensions_m.y * 0.5 + MONSTER_OFFSET_Y_M;
+        let mut offset_local_y = 0.0;
+        if let (Some(floor), Some(player_z)) = (floor, player_z) {
+            if let Ok(parent) = parents.get(entity) {
+                let ramp_entity = parent.parent();
+                if let Ok((_, ramp_transform, _, _)) = ramps.get(ramp_entity) {
+                    let cutoff = config.ramp_unlit_distance_z_m.max(0.0);
+                    let blend = config.spawn_z_extend_m.max(0.1);
+                    let dz = (ramp_transform.translation.z - player_z).abs();
+                    let curvature_t = ((dz - cutoff) / blend).clamp(0.0, 1.0);
+                    if curvature_t > 0.0 {
+                        let radius = PLANET_VISUAL_RADIUS_M.max(0.1);
+                        let dx = ramp_transform.translation.x - floor.center.x;
+                        let dz_center = ramp_transform.translation.z - floor.center.z;
+                        let max_dist = (radius * RAMP_CURVATURE_MAX_DIST_SCALE).max(0.0);
+                        let max_sq = (max_dist * max_dist).min(radius * radius * 0.999);
+                        let dist_sq = (dx * dx + dz_center * dz_center).min(max_sq);
+                        let drop = radius - (radius * radius - dist_sq).sqrt();
+                        let offset_y = -(drop * RAMP_CURVATURE_STRENGTH) * curvature_t;
+                        let local_offset = ramp_transform
+                            .rotation
+                            .inverse()
+                            .mul_vec3(Vec3::new(0.0, offset_y, 0.0));
+                        offset_local_y = local_offset.y;
+                    }
+                }
+            }
+        }
+        transform.translation.y = base_y + offset_local_y;
     }
 }
 
@@ -1923,9 +1971,21 @@ fn ensure_unlit_material(
     }
     let mut material = materials.get(lit)?.clone();
     material.unlit = true;
+    material.double_sided = true;
+    material.cull_mode = None;
     let handle = materials.add(material);
     cache.unlit_by_lit.insert(lit.clone(), handle.clone());
     Some(handle)
+}
+
+fn force_double_sided(
+    materials: &mut Assets<StandardMaterial>,
+    material: &Handle<StandardMaterial>,
+) {
+    if let Some(mat) = materials.get_mut(material) {
+        mat.double_sided = true;
+        mat.cull_mode = None;
+    }
 }
 
 fn is_downhill_like(mode: GameplayMode) -> bool {

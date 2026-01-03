@@ -30,7 +30,7 @@ const DEFAULT_MODES: [GameplayMode; 5] = [
     GameplayMode::ShooterGameplay,
     GameplayMode::KillingMonsterGameplay,
 ];
-const DEFAULT_SWITCH_INTERVAL_S: f32 = 120.0;
+const DEFAULT_SWITCH_INTERVAL_S: f32 = 60.0;
 const DEFAULT_SEED: u32 = 0xA5A5_1234;
 
 /// Global gameplay state used to pick the active ramp generation mode.

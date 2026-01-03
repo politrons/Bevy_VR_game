@@ -167,6 +167,15 @@ pub(crate) fn setup_scene(
         Transform::from_xyz(0.0, 80.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
         Name::new("SunLight"),
     ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 600.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(0.0, -80.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Name::new("FillLight"),
+    ));
 
     // Road/floor parameters
     // Half the previous size (width and length)

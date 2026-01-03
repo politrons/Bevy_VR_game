@@ -25,9 +25,19 @@ const RIGHT_CONTROLLER_MODEL_YAW_RAD: f32 =
     std::f32::consts::PI + std::f32::consts::PI / 9.0 - std::f32::consts::PI / 6.0
         - std::f32::consts::FRAC_PI_4 + std::f32::consts::PI;
 const RIGHT_CONTROLLER_MODEL_ROLL_RAD: f32 = 0.0;
+const LEFT_CONTROLLER_MODEL_SCALE: f32 = 0.144;
+const LEFT_CONTROLLER_MODEL_PITCH_RAD: f32 = std::f32::consts::PI;
+const LEFT_CONTROLLER_MODEL_YAW_RAD: f32 = std::f32::consts::PI / 9.0;
+const LEFT_CONTROLLER_MODEL_ROLL_RAD: f32 = 0.0;
 
 #[derive(Resource, Default)]
 pub(crate) struct RightControllerModelStatus {
+    pub(crate) spawned: bool,
+    pub(crate) failed: bool,
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct LeftControllerModelStatus {
     pub(crate) spawned: bool,
     pub(crate) failed: bool,
 }
@@ -281,6 +291,7 @@ pub(crate) fn register_controller_cubes(app: &mut App) {
                 .before(OxrActionSetSyncSet)
                 .run_if(openxr_session_running),
         )
+        .add_systems(Update, swap_left_controller_model.run_if(openxr_session_running))
         .add_systems(Update, swap_right_controller_model.run_if(openxr_session_running))
         .add_systems(XrPreDestroySession, cleanup_controller_cubes);
 }
@@ -298,8 +309,10 @@ pub(crate) struct ControllerActions {
 pub(crate) struct ControllerCubeAssets {
     pub(crate) mesh: Handle<Mesh>,
     pub(crate) left_material: Handle<StandardMaterial>,
+    pub(crate) hand_material: Handle<StandardMaterial>,
     pub(crate) right_material: Handle<StandardMaterial>,
     pub(crate) gun_material: Handle<StandardMaterial>,
+    pub(crate) left_gltf: Handle<Gltf>,
     pub(crate) right_gltf: Handle<Gltf>,
 }
 
@@ -320,6 +333,12 @@ pub(crate) struct RightControllerPlaceholder;
 
 #[derive(Component)]
 pub(crate) struct RightControllerModel;
+
+#[derive(Component)]
+pub(crate) struct LeftControllerPlaceholder;
+
+#[derive(Component)]
+pub(crate) struct LeftControllerModel;
 
 #[derive(Component)]
 pub(crate) struct LeftControllerAim;
@@ -347,6 +366,12 @@ pub(crate) fn setup_controller_cubes(
         unlit: true,
         ..default()
     });
+    let hand_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.65, 0.65, 0.65),
+        emissive: Color::srgb(0.10, 0.10, 0.10).into(),
+        unlit: true,
+        ..default()
+    });
 
     let gun_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.65, 0.65, 0.65),
@@ -363,15 +388,26 @@ pub(crate) fn setup_controller_cubes(
             settings.load_animations = false;
         },
     );
+    let left_gltf: Handle<Gltf> = asset_server.load_with_settings(
+        "textures/hand.glb",
+        |settings: &mut GltfLoaderSettings| {
+            settings.load_cameras = false;
+            settings.load_lights = false;
+            settings.load_animations = false;
+        },
+    );
 
     commands.insert_resource(ControllerCubeAssets {
         mesh,
         left_material,
+        hand_material,
         right_material,
         gun_material,
+        left_gltf,
         right_gltf,
     });
     commands.insert_resource(RightControllerModelStatus::default());
+    commands.insert_resource(LeftControllerModelStatus::default());
 }
 
 /// Creates the OpenXR action set and pose actions once per app.
@@ -491,6 +527,7 @@ pub(crate) fn spawn_controller_cubes(
     actions: Option<Res<ControllerActions>>,
     assets: Option<Res<ControllerCubeAssets>>,
     mut model_status: Option<ResMut<RightControllerModelStatus>>,
+    mut left_model_status: Option<ResMut<LeftControllerModelStatus>>,
     session: Res<OxrSession>,
     mut commands: Commands,
     existing: Query<Entity, With<ControllerCube>>,
@@ -499,6 +536,10 @@ pub(crate) fn spawn_controller_cubes(
         return;
     };
     if let Some(status) = model_status.as_mut() {
+        status.spawned = false;
+        status.failed = false;
+    }
+    if let Some(status) = left_model_status.as_mut() {
         status.spawned = false;
         status.failed = false;
     }
@@ -551,13 +592,31 @@ pub(crate) fn spawn_controller_cubes(
         }
     };
 
+    let left_root = commands
+        .spawn((
+            ControllerCube,
+            LeftController,
+            left_space,
+            Name::new("LeftControllerRoot"),
+        ))
+        .id();
+    let left_placeholder = commands
+        .spawn((
+            ControllerCube,
+            LeftControllerPlaceholder,
+            Mesh3d(assets.mesh.clone()),
+            MeshMaterial3d(assets.left_material.clone()),
+            Name::new("LeftControllerPlaceholder"),
+        ))
+        .id();
+    commands.entity(left_root).add_child(left_placeholder);
+
     commands.spawn((
         ControllerCube,
-        LeftController,
-        left_space,
-        Mesh3d(assets.mesh.clone()),
-        MeshMaterial3d(assets.left_material.clone()),
-        Name::new("LeftControllerCube"),
+        ControllerAim,
+        LeftControllerAim,
+        left_aim_space,
+        Name::new("LeftControllerAim"),
     ));
 
     let right_root = commands.spawn((
@@ -578,12 +637,6 @@ pub(crate) fn spawn_controller_cubes(
         .id();
     commands.entity(right_root).add_child(placeholder);
 
-    commands.spawn((
-        ControllerAim,
-        LeftControllerAim,
-        left_aim_space,
-        Name::new("LeftControllerAim"),
-    ));
     commands.spawn((
         ControllerAim,
         RightControllerAim,
@@ -687,12 +740,108 @@ pub(crate) fn swap_right_controller_model(
     }
 }
 
+/// Swaps the left controller placeholder cube for the loaded GLB scene.
+pub(crate) fn swap_left_controller_model(
+    assets: Option<Res<ControllerCubeAssets>>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    status: Option<ResMut<LeftControllerModelStatus>>,
+    left_roots: Query<Entity, With<LeftController>>,
+    placeholders: Query<Entity, With<LeftControllerPlaceholder>>,
+    mut commands: Commands,
+) {
+    let (Some(assets), Some(mut status)) = (assets, status) else {
+        return;
+    };
+    if status.spawned || status.failed {
+        return;
+    }
+
+    let Some(state) = asset_server.get_load_state(assets.left_gltf.id()) else {
+        return;
+    };
+    match state {
+        bevy::asset::LoadState::Loaded => {
+            let Some(gltf) = gltfs.get(&assets.left_gltf) else {
+                return;
+            };
+            if gltf.meshes.is_empty() {
+                log::warn!("Left controller model has no meshes.");
+                status.failed = true;
+                return;
+            }
+            let mut primitives = Vec::new();
+            for mesh_handle in &gltf.meshes {
+                let Some(gltf_mesh) = gltf_meshes.get(mesh_handle) else {
+                    return;
+                };
+                for primitive in &gltf_mesh.primitives {
+                    let material = primitive
+                        .material
+                        .clone()
+                        .unwrap_or_else(|| assets.hand_material.clone());
+                    primitives.push((primitive.mesh.clone(), material));
+                }
+            }
+            if primitives.is_empty() {
+                log::warn!("Left controller model has no mesh primitives.");
+                status.failed = true;
+                return;
+            }
+            let mut spawned_any = false;
+            for root in &left_roots {
+                let model = commands
+                    .spawn((
+                        ControllerCube,
+                        LeftControllerModel,
+                        Transform {
+                            rotation: Quat::from_euler(
+                                EulerRot::XYZ,
+                                LEFT_CONTROLLER_MODEL_PITCH_RAD,
+                                LEFT_CONTROLLER_MODEL_YAW_RAD,
+                                LEFT_CONTROLLER_MODEL_ROLL_RAD,
+                            ),
+                            scale: Vec3::splat(LEFT_CONTROLLER_MODEL_SCALE),
+                            ..default()
+                        },
+                        Name::new("LeftControllerModel"),
+                    ))
+                    .id();
+                commands.entity(model).with_children(|parent| {
+                    for (mesh, material) in &primitives {
+                        parent.spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(material.clone()),
+                        ));
+                    }
+                });
+                commands.entity(root).add_child(model);
+                spawned_any = true;
+            }
+            if !spawned_any {
+                return;
+            }
+            for placeholder in &placeholders {
+                commands.entity(placeholder).despawn();
+            }
+            status.spawned = true;
+        }
+        bevy::asset::LoadState::Failed(err) => {
+            log::warn!("Left controller model failed to load: {:?}", err);
+            status.failed = true;
+        }
+        _ => {}
+    }
+}
+
 /// Despawns controller cubes when the session ends.
 pub(crate) fn cleanup_controller_cubes(
     mut commands: Commands,
     cubes: Query<Entity, With<ControllerCube>>,
     aims: Query<Entity, With<ControllerAim>>,
     mut model_status: Option<ResMut<RightControllerModelStatus>>,
+    mut left_model_status: Option<ResMut<LeftControllerModelStatus>>,
 ) {
     for entity in &cubes {
         commands.entity(entity).despawn();
@@ -701,6 +850,10 @@ pub(crate) fn cleanup_controller_cubes(
         commands.entity(entity).despawn();
     }
     if let Some(status) = model_status.as_mut() {
+        status.spawned = false;
+        status.failed = false;
+    }
+    if let Some(status) = left_model_status.as_mut() {
         status.spawned = false;
         status.failed = false;
     }
