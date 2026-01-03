@@ -27,7 +27,7 @@ const RIGHT_CONTROLLER_MODEL_YAW_RAD: f32 =
 const RIGHT_CONTROLLER_MODEL_ROLL_RAD: f32 = 0.0;
 const LEFT_CONTROLLER_MODEL_SCALE: f32 = 0.144;
 const LEFT_CONTROLLER_MODEL_PITCH_RAD: f32 = std::f32::consts::PI;
-const LEFT_CONTROLLER_MODEL_YAW_RAD: f32 = std::f32::consts::PI / 9.0;
+const LEFT_CONTROLLER_MODEL_YAW_RAD: f32 = std::f32::consts::PI / 1.0;
 const LEFT_CONTROLLER_MODEL_ROLL_RAD: f32 = 0.0;
 
 #[derive(Resource, Default)]
